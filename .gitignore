@@ -1,0 +1,50 @@
+# Build output
+out/
+build/
+cmake-build-*/
+CMakeUserPresets.json
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.ipch
+*.pdb
+*.idb
+*.ilk
+*.obj
+*.exe
+*.dll
+*.lib
+*.exp
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+
+# vcpkg
+vcpkg_installed/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Analysis output
+*.dot
+*.svg
+analysis-output/

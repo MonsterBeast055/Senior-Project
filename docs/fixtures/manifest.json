@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "functions": [
+    {
+      "va": "0x140002100",
+      "name": "sub_140002100",
+      "file": "functions/func_140002100.json",
+      "instruction_count": 9,
+      "block_count": 1
+    },
+    {
+      "va": "0x140001080",
+      "name": "sub_140001080",
+      "file": "functions/func_140001080.json",
+      "instruction_count": 14,
+      "block_count": 4
+    },
+    {
+      "va": "0x1400020a0",
+      "name": "sub_1400020a0",
+      "file": "functions/func_1400020a0.json",
+      "instruction_count": 22,
+      "block_count": 3
+    }
+  ],
+  "count": 3
+}

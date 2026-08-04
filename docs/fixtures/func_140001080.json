@@ -1,0 +1,268 @@
+{
+  "schema_version": "1.0",
+  "id": 216172782113783809,
+  "va": "0x140001080",
+  "name": "sub_140001080",
+  "extent_end": "0x1400010c6",
+  "convention": "win64",
+  "is_thunk": false,
+  "is_imported_stub": false,
+  "returns": true,
+  "instruction_count": 14,
+  "indirect_call_count": 1,
+  "confidence": "certain",
+  "provenance": [
+    { "kind": "pe-unwind-info", "confidence": "certain", "source": null },
+    { "kind": "direct-call-target", "confidence": "high", "source": "0x1400020a4" }
+  ],
+  "frame": {
+    "local_size": 40,
+    "saved_regs_size": 0,
+    "uses_frame_pointer": false
+  },
+  "block_order": ["0x140001080", "0x1400010a2", "0x1400010b4", "0x1400010c0"],
+  "blocks": [
+    {
+      "id": 144115188075855873,
+      "start": "0x140001080",
+      "end": "0x1400010a2",
+      "instruction_count": 6,
+      "has_unresolved_exit": false,
+      "instructions": [
+        {
+          "va": "0x140001080",
+          "size": 4,
+          "mnemonic": "sub",
+          "operands": "rsp, 0x28",
+          "flow": "sequential",
+          "bytes": "4883ec28",
+          "target": null,
+          "target_name": null,
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": [
+            { "kind": "pe-unwind-info", "confidence": "certain", "source": null }
+          ]
+        },
+        {
+          "va": "0x140001084",
+          "size": 7,
+          "mnemonic": "lea",
+          "operands": "rcx, [rip + 0x1f7d]",
+          "flow": "sequential",
+          "bytes": "488d0d7d1f0000",
+          "target": null,
+          "target_name": null,
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": []
+        },
+        {
+          "va": "0x14000108b",
+          "size": 5,
+          "mnemonic": "xor",
+          "operands": "edx, edx",
+          "flow": "sequential",
+          "bytes": "33d2909090",
+          "target": null,
+          "target_name": null,
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": []
+        },
+        {
+          "va": "0x140001090",
+          "size": 6,
+          "mnemonic": "call",
+          "operands": "qword ptr [rip + 0x1f0d2]",
+          "flow": "call",
+          "bytes": "ff15d2f00100",
+          "target": null,
+          "target_name": "KERNEL32.dll!CreateFileW",
+          "indirect": true,
+          "confidence": "certain",
+          "provenance": []
+        },
+        {
+          "va": "0x140001096",
+          "size": 4,
+          "mnemonic": "cmp",
+          "operands": "rax, -1",
+          "flow": "sequential",
+          "bytes": "4883f8ff",
+          "target": null,
+          "target_name": null,
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": []
+        },
+        {
+          "va": "0x14000109a",
+          "size": 8,
+          "mnemonic": "je",
+          "operands": "0x1400010b4",
+          "flow": "conditional-jump",
+          "bytes": "0f8414000000",
+          "target": "0x1400010b4",
+          "target_name": "sub_140001080",
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": []
+        }
+      ],
+      "successors": [
+        { "target": "0x1400010b4", "kind": "taken", "confidence": "high" },
+        { "target": "0x1400010a2", "kind": "fall-through", "confidence": "high" }
+      ],
+      "predecessors": []
+    },
+    {
+      "id": 144115188075855874,
+      "start": "0x1400010a2",
+      "end": "0x1400010b4",
+      "instruction_count": 3,
+      "has_unresolved_exit": false,
+      "instructions": [
+        {
+          "va": "0x1400010a2",
+          "size": 3,
+          "mnemonic": "mov",
+          "operands": "rcx, rax",
+          "flow": "sequential",
+          "bytes": "48 8bc8",
+          "target": null,
+          "target_name": null,
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": []
+        },
+        {
+          "va": "0x1400010a5",
+          "size": 5,
+          "mnemonic": "call",
+          "operands": "0x140002100",
+          "flow": "call",
+          "bytes": "e856100000",
+          "target": "0x140002100",
+          "target_name": "sub_140002100",
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": []
+        },
+        {
+          "va": "0x1400010aa",
+          "size": 10,
+          "mnemonic": "jmp",
+          "operands": "0x1400010c0",
+          "flow": "unconditional-jump",
+          "bytes": "e911000000",
+          "target": "0x1400010c0",
+          "target_name": "sub_140001080",
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": []
+        }
+      ],
+      "successors": [
+        { "target": "0x1400010c0", "kind": "jump", "confidence": "high" }
+      ],
+      "predecessors": ["0x140001080"]
+    },
+    {
+      "id": 144115188075855875,
+      "start": "0x1400010b4",
+      "end": "0x1400010c0",
+      "instruction_count": 3,
+      "has_unresolved_exit": true,
+      "instructions": [
+        {
+          "va": "0x1400010b4",
+          "size": 5,
+          "mnemonic": "mov",
+          "operands": "ecx, dword ptr [rsp + 0x30]",
+          "flow": "sequential",
+          "bytes": "8b4c2430",
+          "target": null,
+          "target_name": null,
+          "indirect": false,
+          "confidence": "low",
+          "provenance": [
+            { "kind": "linear-sweep", "confidence": "low", "source": "0x1400010b4" }
+          ]
+        },
+        {
+          "va": "0x1400010b9",
+          "size": 3,
+          "mnemonic": "and",
+          "operands": "ecx, 3",
+          "flow": "sequential",
+          "bytes": "83e103",
+          "target": null,
+          "target_name": null,
+          "indirect": false,
+          "confidence": "low",
+          "provenance": []
+        },
+        {
+          "va": "0x1400010bc",
+          "size": 4,
+          "mnemonic": "jmp",
+          "operands": "qword ptr [rcx*8 + 0x140019a20]",
+          "flow": "unconditional-jump",
+          "bytes": "ff24cd",
+          "target": null,
+          "target_name": null,
+          "indirect": true,
+          "confidence": "low",
+          "provenance": []
+        }
+      ],
+      "successors": [],
+      "predecessors": ["0x140001080"]
+    },
+    {
+      "id": 144115188075855876,
+      "start": "0x1400010c0",
+      "end": "0x1400010c6",
+      "instruction_count": 2,
+      "has_unresolved_exit": false,
+      "instructions": [
+        {
+          "va": "0x1400010c0",
+          "size": 4,
+          "mnemonic": "add",
+          "operands": "rsp, 0x28",
+          "flow": "sequential",
+          "bytes": "4883c428",
+          "target": null,
+          "target_name": null,
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": []
+        },
+        {
+          "va": "0x1400010c4",
+          "size": 1,
+          "mnemonic": "ret",
+          "operands": "",
+          "flow": "return",
+          "bytes": "c3",
+          "target": null,
+          "target_name": null,
+          "indirect": false,
+          "confidence": "certain",
+          "provenance": []
+        }
+      ],
+      "successors": [],
+      "predecessors": ["0x1400010a2"]
+    }
+  ],
+  "callees": [
+    { "va": "0x140002100", "name": "sub_140002100" }
+  ],
+  "callers": [
+    { "va": "0x1400020a0", "name": "sub_1400020a0" }
+  ],
+  "unreachable_blocks": []
+}

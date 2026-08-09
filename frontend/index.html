@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Senior-Project Binary Analyzer</title>
+<link rel="stylesheet" href="css/xp.css">
+</head>
+<body>
+<div id="app">
+
+  <div class="titlebar">
+    <div class="icon">SP</div>
+    <div id="title-text">Senior-Project Binary Analyzer</div>
+    <div class="spacer"></div>
+    <button title="Minimize">0</button>
+    <button title="Maximize">1</button>
+    <button class="close" title="Close">r</button>
+  </div>
+
+  <div class="menubar">
+    <div class="item">File</div>
+    <div class="item">Edit</div>
+    <div class="item">View</div>
+    <div class="item">Analysis</div>
+    <div class="item">Window</div>
+    <div class="item">Help</div>
+  </div>
+
+  <div class="toolbar">
+    <button class="xp" id="btn-reload" title="Reload analysis data">Reload</button>
+    <div class="sep"></div>
+    <span>Filter:</span>
+    <input class="xp" id="filter" style="width:150px" placeholder="name or address" autocomplete="off">
+    <button class="xp" id="btn-clear">Clear</button>
+    <div class="sep"></div>
+    <label><input type="checkbox" id="hide-thunks" checked> Hide thunks</label>
+    <label style="margin-left:8px"><input type="checkbox" id="only-interesting"> Score &ge; 20</label>
+    <div class="sep"></div>
+    <span>Data:</span>
+    <select class="xp" id="source-select">
+      <option value="sample">Sample (notepad.exe)</option>
+      <option value="api">Backend API</option>
+    </select>
+    <input class="xp" id="api-base" style="width:190px" value="http://localhost:3000/api" title="API base URL">
+  </div>
+
+  <div class="workspace">
+
+    <!-- Functions ------------------------------------------------------- -->
+    <div class="column" id="col-functions">
+      <div class="panel">
+        <div class="caption">
+          Functions
+          <span class="spacer"></span>
+          <span class="hint" id="fn-count">0</span>
+        </div>
+        <div class="body">
+          <table class="grid" id="fn-table">
+            <thead>
+              <tr>
+                <th data-sort="va" style="width:82px">Address</th>
+                <th data-sort="name">Name</th>
+                <th data-sort="information_score" class="num" style="width:38px" title="Information score">Sc</th>
+                <th data-sort="block_count" class="num" style="width:34px" title="Basic blocks">Bl</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Listing / Graph -------------------------------------------------- -->
+    <div class="column" id="col-center">
+      <div class="panel">
+        <div class="caption">
+          <span id="center-title">Listing</span>
+          <span class="spacer"></span>
+          <span class="hint" id="center-hint"></span>
+        </div>
+        <div class="tabstrip" id="center-tabs">
+          <div class="tab active" data-page="page-listing">Disassembly</div>
+          <div class="tab" data-page="page-graph">Graph</div>
+        </div>
+        <div class="body" style="background:#FFFFFF">
+          <div class="tabpage active" id="page-listing">
+            <div class="empty">Select a function.</div>
+          </div>
+          <div class="tabpage" id="page-graph">
+            <div id="graph-host"><div class="empty">Select a function.</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Decompiler ------------------------------------------------------- -->
+    <div class="column" id="col-right">
+      <div class="panel">
+        <div class="caption">
+          Decompiler
+          <span class="spacer"></span>
+          <span class="hint" id="decomp-hint"></span>
+        </div>
+        <div class="body">
+          <div id="decomp"><div class="empty">Select a function.</div></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Bottom dock -------------------------------------------------------- -->
+  <div class="bottom-dock">
+    <div class="panel">
+      <div class="tabstrip" id="dock-tabs">
+        <div class="tab active" data-page="page-findings">Findings</div>
+        <div class="tab" data-page="page-strings">Strings</div>
+        <div class="tab" data-page="page-xrefs">Cross-references</div>
+        <div class="tab" data-page="page-imports">Imports</div>
+        <div class="tab" data-page="page-sections">Sections</div>
+      </div>
+      <div class="body">
+        <div class="tabpage active" id="page-findings"></div>
+        <div class="tabpage" id="page-strings"></div>
+        <div class="tabpage" id="page-xrefs"><div class="empty">Select a function.</div></div>
+        <div class="tabpage" id="page-imports"></div>
+        <div class="tabpage" id="page-sections"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <div class="cell" id="st-file">No file</div>
+    <div class="cell" id="st-arch">-</div>
+    <div class="cell" id="st-coverage">-</div>
+    <div class="cell" id="st-sel">-</div>
+    <div class="cell grow" id="st-msg">Ready</div>
+  </div>
+
+</div>
+
+<script src="js/data.js"></script>
+<script src="js/graph.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

@@ -45,6 +45,10 @@ add_library(sp_engine STATIC
     "src/analysis/XrefTable.cpp"
     "src/analysis/CallGraph.cpp"
     "src/analysis/SymbolTable.cpp"
+    "src/analysis/StringExtractor.cpp"
+    "src/analysis/FunctionSummarizer.cpp"
+    "src/analysis/ApiClassifier.cpp"
+    "src/analysis/Reachability.cpp"
     "src/analysis/LoopAnalysis.cpp"
 
     # lift

@@ -10,6 +10,8 @@
 //
 #include "sp/analysis/CallGraph.h"
 #include "sp/analysis/Function.h"
+#include "sp/analysis/Reachability.h"
+#include "sp/analysis/StringExtractor.h"
 #include "sp/analysis/SymbolTable.h"
 #include "sp/analysis/XrefTable.h"
 #include "sp/core/Error.h"
@@ -48,6 +50,8 @@ public:
         const analysis::SymbolTable* symbols = nullptr;
         const analysis::XrefTable* xrefs = nullptr;
         const analysis::CallGraph* call_graph = nullptr;
+        const analysis::Reachability* reachability = nullptr;
+        const analysis::StringExtractor* strings = nullptr;
         const std::map<core::VA, analysis::Function>* functions = nullptr;
     };
 
@@ -71,6 +75,14 @@ public:
     static core::Status export_call_graph(const Inputs& inputs,
                                          const JsonOptions& options,
                                          std::ostream& out);
+
+    // Security findings: risky operations, whether untrusted input can reach
+    // them, and the call path as evidence. Reachable findings carry an explicit
+    // statement of what the analysis did NOT establish, so no consumer can
+    // present graph reachability as proven exploitability.
+    static core::Status export_findings(const Inputs& inputs,
+                                       const JsonOptions& options,
+                                       std::ostream& out);
 };
 
 } // namespace sp::serialize

@@ -1,6 +1,7 @@
 #include "sp/serialize/JsonExporter.h"
 
 #include <iomanip>
+#include <set>
 #include <sstream>
 
 namespace sp::serialize {
@@ -125,6 +126,17 @@ private:
     bool pending_key_ = false;
 };
 
+// A 64-bit value emitted as a JSON number loses precision in any JavaScript
+// consumer (safe integers stop at 53 bits). content_hash is a cache key, so a
+// silently-corrupted low word would cause wrong cache hits. Hex string, same
+// reasoning as addresses.
+std::string hex_u64(std::uint64_t value)
+{
+    std::ostringstream out;
+    out << "0x" << std::hex << value;
+    return out.str();
+}
+
 std::string bytes_to_hex(const std::vector<std::uint8_t>& bytes)
 {
     std::ostringstream out;
@@ -133,6 +145,15 @@ std::string bytes_to_hex(const std::vector<std::uint8_t>& bytes)
         out << std::setw(2) << static_cast<int>(b);
     }
     return out.str();
+}
+
+// Resolved name for a function address, or the generated `sub_<va>` form. Shared
+// so every document spells an unnamed function the same way - a UI that saw
+// `sub_140002418` in one place and `0x140002418` in another would look broken.
+std::string function_name(const analysis::SymbolTable* symbols, core::VA va)
+{
+    return symbols != nullptr ? symbols->name_for(va)
+                              : analysis::SymbolTable::generated_name(va, true);
 }
 
 core::Status require(const JsonExporter::Inputs& inputs)
@@ -182,16 +203,37 @@ void write_instruction(JsonWriter& json,
         json.null_value();
     }
 
-    // Resolved symbol for the branch destination. This single field is what
-    // turns "call 0x140001a20" into something a human or a model can act on.
+    // Resolved name for whatever this instruction transfers control to. The
+    // single most valuable field in the whole document.
+    //
+    // Two cases, and the second matters more on real binaries: a direct
+    // `call 0x140001a20`, and an indirect `call qword [rip+0x1f0ce]` reading an
+    // IAT slot. Nearly every Windows API call takes the second form, so without
+    // resolving through the slot every API call in the output is nameless.
     json.key("target_name");
-    if (insn.direct_target.has_value() && symbols != nullptr) {
+    if (symbols != nullptr && insn.direct_target.has_value()) {
         json.string_value(symbols->name_for(*insn.direct_target));
+    } else if (symbols != nullptr && insn.memory_reference.has_value()
+               && (insn.is_call() || insn.is_jump())) {
+        const analysis::Symbol* imported =
+            symbols->resolve_iat_slot(*insn.memory_reference);
+        if (imported != nullptr) {
+            json.string_value(imported->name);
+        } else {
+            json.null_value();
+        }
     } else {
         json.null_value();
     }
 
     json.field("indirect", insn.is_indirect);
+
+    json.key("memory_ref");
+    if (insn.memory_reference.has_value()) {
+        json.address(*insn.memory_reference);
+    } else {
+        json.null_value();
+    }
 
     if (!insn.resolved_targets.empty()) {
         json.key("resolved_targets");
@@ -213,6 +255,17 @@ void write_instruction(JsonWriter& json,
     json.end_object();
 }
 
+void write_string_array(JsonWriter& json, const char* name,
+                       const std::vector<std::string>& values)
+{
+    json.key(name);
+    json.begin_array();
+    for (const std::string& value : values) {
+        json.string_value(value);
+    }
+    json.end_array();
+}
+
 void write_function_summary(JsonWriter& json,
                           const analysis::Function& function,
                           const analysis::SymbolTable* symbols,
@@ -232,6 +285,16 @@ void write_function_summary(JsonWriter& json,
     json.field("indirect_call_count", function.indirect_call_count);
     json.field("callee_count", function.callees.size());
     json.field("caller_count", function.callers.size());
+
+    // Consumer-facing triage fields. content_hash exists for the AI layer's
+    // cache; information_score and complexity are routing hints so it does not
+    // have to reimplement this analysis to decide what deserves a model call.
+    json.field("content_hash", hex_u64(function.content_hash));
+    json.field("cyclomatic_complexity", function.cyclomatic_complexity);
+    json.field("information_score", static_cast<std::uint64_t>(function.information_score));
+    json.field("api_call_count", function.api_calls.size());
+    json.field("string_count", function.referenced_strings.size());
+    json.field("is_library_code", function.is_library_code);
 
     if (options.include_confidence) {
         json.field("confidence", core::to_string(function.confidence()));
@@ -308,6 +371,90 @@ core::Status JsonExporter::export_image(const Inputs& inputs,
     }
     json.end_array();
 
+    // Maps a referring instruction address to the function that declares it.
+    // Greatest entry <= address, then a bounds check: O(log n), which matters
+    // because kernel32 has ~1700 functions and thousands of reference sites.
+    //
+    // Declared extents rather than block ranges: an instruction sitting in a gap
+    // the CFG never claimed still belongs to the function declaring that range.
+    // A function whose extent_end is unknown absorbs addresses after it, so this
+    // can attribute slightly too generously - never too narrowly.
+    const auto owning_function = [&](core::VA address) -> core::VA {
+        if (inputs.functions == nullptr) {
+            return core::kInvalidVA;
+        }
+        auto it = inputs.functions->upper_bound(address);
+        if (it == inputs.functions->begin()) {
+            return core::kInvalidVA;
+        }
+        --it;
+        const analysis::Function& candidate = it->second;
+        if (candidate.extent_end != core::kInvalidVA
+            && address >= candidate.extent_end) {
+            return core::kInvalidVA;
+        }
+        return it->first;
+    };
+
+    // --- Strings ----------------------------------------------------------
+    // The global list, so a UI can offer a Strings window without loading every
+    // function document. Per-function `referenced_strings` still exists; this is
+    // the same data indexed the other way.
+    if (inputs.strings != nullptr) {
+        json.key("strings");
+        json.begin_array();
+        for (const auto& entry : inputs.strings->strings()) {
+            const analysis::ExtractedString& text = entry.second;
+            json.begin_object();
+            json.address_field("address", text.address);
+            json.field("encoding", analysis::to_string(text.encoding));
+            json.field("text", text.text);
+            json.field("length", static_cast<std::uint64_t>(text.length));
+            json.field("truncated", text.truncated);
+
+            const std::vector<core::VA>* refs =
+                inputs.strings->referrers_of(text.address);
+            json.field("refs", static_cast<std::uint64_t>(refs ? refs->size() : 0));
+
+            // True when every function referencing this string is library code.
+            //
+            // These strings are real - "(null)", ".exe", "ERROR: Unable to
+            // initialize" all genuinely exist in the binary. They are just the
+            // MSVC C runtime's, identical in every binary built with it, and they
+            // say nothing about *this* program. Flagged rather than dropped: a
+            // consumer can fold them away, and "the CRT is present" is
+            // occasionally the fact you want.
+            //
+            // Requires at least one known referrer. A string with no resolvable
+            // owner is unclassified, not library - claiming otherwise would hide
+            // it on no evidence.
+            bool library_only = false;
+            if (refs != nullptr && !refs->empty() && inputs.functions != nullptr) {
+                bool any_owner = false;
+                bool all_library = true;
+                for (core::VA site : *refs) {
+                    const core::VA owner = owning_function(site);
+                    if (owner == core::kInvalidVA) {
+                        continue;
+                    }
+                    auto found = inputs.functions->find(owner);
+                    if (found == inputs.functions->end()) {
+                        continue;
+                    }
+                    any_owner = true;
+                    if (!found->second.is_library_code) {
+                        all_library = false;
+                        break;
+                    }
+                }
+                library_only = any_owner && all_library;
+            }
+            json.field("library_only", library_only);
+            json.end_object();
+        }
+        json.end_array();
+    }
+
     // --- Unwind table -----------------------------------------------------
     // Authoritative function boundaries straight from .pdata. Emitted because
     // it is the ground truth every other boundary decision is checked against,
@@ -323,6 +470,93 @@ core::Status JsonExporter::export_image(const Inputs& inputs,
         json.end_object();
     }
     json.end_array();
+
+    // --- Cross-reference indexes ------------------------------------------
+    // The reverse direction of api_calls and referenced_strings.
+    //
+    // Without these, an imports list and a strings list are dead ends. The
+    // question worth asking is never "where does KERNEL32!RegSetValueExW live"
+    // (an IAT slot in .idata, holding no code) but "who calls it" - which is the
+    // question that leads to a finding. Same for a string: the interesting thing
+    // is the code that uses it.
+    //
+    // Built here rather than in each consumer because a consumer holding only
+    // functions.json cannot derive it: the summary list emits api_call_count, not
+    // the list, and fetching all 1700 function documents to build an index is not
+    // a reasonable alternative.
+    if (inputs.functions != nullptr) {
+        // api name -> functions that call it.
+        std::map<std::string, std::vector<core::VA>> api_to_functions;
+        for (const auto& entry : *inputs.functions) {
+            for (const std::string& api : entry.second.api_calls) {
+                api_to_functions[api].push_back(entry.first);
+            }
+        }
+
+        json.key("api_xrefs");
+        json.begin_array();
+        for (const auto& entry : api_to_functions) {
+            json.begin_object();
+            json.field("api", entry.first);
+            json.field("count", static_cast<std::uint64_t>(entry.second.size()));
+            json.key("functions");
+            json.begin_array();
+            for (core::VA va : entry.second) {
+                json.begin_object();
+                json.address_field("va", va);
+                json.field("name", function_name(inputs.symbols, va));
+                json.end_object();
+            }
+            json.end_array();
+            json.end_object();
+        }
+        json.end_array();
+
+        // string address -> functions that reference it.
+        //
+        // StringExtractor records referring *instruction* addresses, so each one
+        // is resolved to its containing function. Declared extents are used
+        // rather than block ranges: an instruction inside a gap the CFG never
+        // claimed still belongs to the function that declares that range, and
+        // dropping it would silently understate the xref count.
+        if (inputs.strings != nullptr) {
+            json.key("string_xrefs");
+            json.begin_array();
+            for (const auto& entry : inputs.strings->strings()) {
+                const std::vector<core::VA>* referrers =
+                    inputs.strings->referrers_of(entry.first);
+                if (referrers == nullptr || referrers->empty()) {
+                    continue;
+                }
+
+                std::set<core::VA> owners;
+                for (core::VA site : *referrers) {
+                    const core::VA owner = owning_function(site);
+                    if (owner != core::kInvalidVA) {
+                        owners.insert(owner);
+                    }
+                }
+                if (owners.empty()) {
+                    continue;
+                }
+
+                json.begin_object();
+                json.address_field("address", entry.first);
+                json.field("count", static_cast<std::uint64_t>(owners.size()));
+                json.key("functions");
+                json.begin_array();
+                for (core::VA va : owners) {
+                    json.begin_object();
+                    json.address_field("va", va);
+                    json.field("name", function_name(inputs.symbols, va));
+                    json.end_object();
+                }
+                json.end_array();
+                json.end_object();
+            }
+            json.end_array();
+        }
+    }
 
     // --- Coverage ---------------------------------------------------------
     // Reported so consumers know how much of the image was actually explained.
@@ -442,6 +676,32 @@ core::Status JsonExporter::export_function(const Inputs& inputs,
     json.field("returns", function.returns);
     json.field("instruction_count", function.instruction_count);
     json.field("indirect_call_count", function.indirect_call_count);
+    json.field("content_hash", hex_u64(function.content_hash));
+    json.field("cyclomatic_complexity", function.cyclomatic_complexity);
+    json.field("information_score", static_cast<std::uint64_t>(function.information_score));
+    json.field("is_library_code", function.is_library_code);
+
+    // The two highest-value fields for the AI layer. api_calls resolves through
+    // IAT slots, so indirect Windows API calls are included; referenced_strings
+    // is often more decisive about purpose than the whole instruction listing.
+    write_string_array(json, "api_calls", function.api_calls);
+    write_string_array(json, "referenced_strings", function.referenced_strings);
+
+    // Exposure to untrusted input, if reachability was run. A risky operation
+    // here matters far more when this is true.
+    if (inputs.reachability != nullptr) {
+        json.field("reachable_from_input",
+                   inputs.reachability->is_reachable_from_input(function.entry));
+        json.key("input_sources");
+        json.begin_array();
+        if (const auto* sources =
+                inputs.reachability->sources_reaching(function.entry)) {
+            for (analysis::InputSource source : *sources) {
+                json.string_value(analysis::to_string(source));
+            }
+        }
+        json.end_array();
+    }
 
     if (options.include_confidence) {
         json.field("confidence", core::to_string(function.confidence()));
@@ -539,6 +799,108 @@ core::Status JsonExporter::export_function(const Inputs& inputs,
         json.address(va);
     }
     json.end_array();
+
+    json.end_object();
+    out << "\n";
+    return core::Status::success();
+}
+
+core::Status JsonExporter::export_findings(const Inputs& inputs,
+                                          const JsonOptions& options,
+                                          std::ostream& out)
+{
+    if (auto status = require(inputs); !status.ok()) {
+        return status;
+    }
+    if (inputs.reachability == nullptr) {
+        return core::Error(core::ErrorCode::InvalidArgument, "reachability is required");
+    }
+
+    const analysis::Reachability& reach = *inputs.reachability;
+    const analysis::SymbolTable* symbols = inputs.symbols;
+
+    auto name_of = [&](core::VA va) { return function_name(symbols, va); };
+
+    JsonWriter json(out, options.pretty);
+    json.begin_object();
+    json.field("schema_version", std::string("1.0"));
+
+    // --- Honest framing, stated once at the top --------------------------
+    // The header is not decoration. A consumer that renders severity without
+    // reading it could present a graph-reachability result as a proven
+    // vulnerability, which would make this tool actively harmful.
+    json.key("methodology");
+    json.begin_object();
+    json.field("analysis", std::string("call-graph reachability"));
+    json.field("value_level_dataflow", false);
+    json.field("proves_exploitability", false);
+    json.field("note", std::string(
+        "Findings identify risky operations and whether a call path exists from "
+        "a function reading untrusted input. This is a necessary condition for "
+        "exploitability, not a sufficient one. Every finding requires manual "
+        "review before being treated as a vulnerability."));
+    json.end_object();
+
+    // --- Input sources found ---------------------------------------------
+    json.key("input_sources");
+    json.begin_array();
+    for (const analysis::SourceSite& site : reach.sources()) {
+        json.begin_object();
+        json.address_field("function", site.function);
+        json.field("function_name", name_of(site.function));
+        json.field("api", site.api);
+        json.field("source", analysis::to_string(site.source));
+        json.end_object();
+    }
+    json.end_array();
+
+    // --- Findings, worst first --------------------------------------------
+    json.key("findings");
+    json.begin_array();
+    for (const analysis::ReachabilityResult& result : reach.results()) {
+        json.begin_object();
+        json.address_field("function", result.function);
+        json.field("function_name", name_of(result.function));
+        json.field("api", result.sink_api);
+        json.field("kind", analysis::to_string(result.sink));
+
+        json.field("reachable_from_input", result.reachable_from_input);
+        json.field("base_severity", analysis::to_string(result.base_severity));
+
+        // Derived from sink kind AND exposure, never asserted. An unbounded copy
+        // with no reachable path is a code-quality note, not a High.
+        json.field("severity", analysis::to_string(result.effective_severity));
+
+        json.key("sources");
+        json.begin_array();
+        for (analysis::InputSource source : result.sources) {
+            json.string_value(analysis::to_string(source));
+        }
+        json.end_array();
+
+        // The call path is the evidence. Without it a reachability claim is
+        // unverifiable, so it ships with every reachable finding.
+        json.key("call_path");
+        json.begin_array();
+        for (core::VA step : result.path) {
+            json.begin_object();
+            json.address_field("va", step);
+            json.field("name", name_of(step));
+            json.end_object();
+        }
+        json.end_array();
+
+        json.field("limitation", result.limitation);
+        json.end_object();
+    }
+    json.end_array();
+
+    json.key("summary");
+    json.begin_object();
+    json.field("risky_operations", reach.results().size());
+    json.field("input_sources", reach.sources().size());
+    json.field("impactful", reach.impactful().size());
+    json.end_object();
 
     json.end_object();
     out << "\n";

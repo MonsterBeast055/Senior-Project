@@ -48,3 +48,12 @@ desktop.ini
 *.dot
 *.svg
 analysis-output/
+
+# Node (backend API and React frontend)
+node_modules/
+dist/
+.env
+
+# Uploaded binaries and their analysis output. Never commit these: they may be
+# malware samples, and they are reproducible from the binary anyway.
+backend/data/

@@ -1,0 +1,16 @@
+{
+  "name": "senior-project-backend",
+  "private": true,
+  "version": "1.0.0",
+  "description": "API facade over the C++ analysis engine. Runs sp.exe, stores and serves its JSON.",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.0.1"
+  }
+}

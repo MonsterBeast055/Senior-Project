@@ -87,6 +87,43 @@ struct Disassembler::Impl {
         }
         return &insn->detail->x86.operands[0];
     }
+
+    // Absolute address of a statically-known memory operand, if any.
+    //
+    // Two forms are resolvable:
+    //   rip-relative  [rip + disp]  -> next_instruction_address + disp
+    //   absolute      [disp]        -> disp, with no base or index register
+    //
+    // Anything involving a runtime register value is not knowable here and is
+    // deliberately left absent rather than guessed at.
+    std::optional<core::VA> memory_reference(const cs_insn* insn) const
+    {
+        if (insn->detail == nullptr) {
+            return std::nullopt;
+        }
+        const cs_x86& detail = insn->detail->x86;
+
+        for (std::uint8_t i = 0; i < detail.op_count; ++i) {
+            const cs_x86_op& op = detail.operands[i];
+            if (op.type != X86_OP_MEM) {
+                continue;
+            }
+
+            if (op.mem.base == X86_REG_RIP) {
+                // Capstone reports the displacement relative to the end of the
+                // instruction, which is what the CPU uses.
+                return static_cast<core::VA>(
+                    static_cast<std::int64_t>(insn->address) + insn->size + op.mem.disp);
+            }
+
+            if (op.mem.base == X86_REG_INVALID && op.mem.index == X86_REG_INVALID
+                && op.mem.disp != 0) {
+                // Absolute displacement, the usual form in 32-bit code.
+                return static_cast<core::VA>(op.mem.disp);
+            }
+        }
+        return std::nullopt;
+    }
 };
 
 Disassembler::Disassembler() : impl_(std::make_unique<Impl>()) {}
@@ -186,6 +223,10 @@ core::Result<InstructionInfo> Disassembler::decode_one(const db::FactStore& fact
             info.is_indirect = true;
         }
     }
+
+    // Statically-known memory operand target. Feeds string extraction and, for
+    // `call qword [rip+N]`, IAT-slot resolution to a named import.
+    info.memory_reference = impl_->memory_reference(raw);
 
     if (info.has_fall_through()) {
         info.fall_through = info.end_address();

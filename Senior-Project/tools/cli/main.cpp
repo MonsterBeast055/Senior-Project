@@ -32,6 +32,7 @@ void print_usage(const char* program)
         << "  cfg        <binary> --at VA    same as disasm (blocks + edges)\n"
         << "  dot        <binary> --at VA    one function as Graphviz\n"
         << "  callgraph  <binary>            whole-image call graph\n"
+        << "  findings   <binary>            risky operations + input reachability\n"
         << "  export     <binary> --out DIR  manifest + per-function JSON (for n8n)\n"
         << "\n"
         << "options:\n"
@@ -129,6 +130,10 @@ int run_export(const sp::Pipeline& pipeline,
         std::ofstream graph_file(root / "callgraph.json");
         sp::serialize::JsonExporter::export_call_graph(inputs, json, graph_file);
     }
+    {
+        std::ofstream findings_file(root / "findings.json");
+        sp::serialize::JsonExporter::export_findings(inputs, json, findings_file);
+    }
 
     // Per-function bundles, named by address so the manifest can reference them.
     std::size_t written = 0;
@@ -220,6 +225,8 @@ int main(int argc, char** argv)
     inputs.xrefs = &pipeline.xrefs();
     inputs.call_graph = &pipeline.call_graph();
     inputs.functions = &pipeline.functions();
+    inputs.reachability = &pipeline.reachability();
+    inputs.strings = &pipeline.strings();
 
     const bool needs_address = (args.command == "disasm")
                             || (args.command == "cfg")
@@ -236,6 +243,8 @@ int main(int argc, char** argv)
         status = sp::serialize::JsonExporter::export_image(inputs, json, std::cout);
     } else if (args.command == "functions") {
         status = sp::serialize::JsonExporter::export_function_list(inputs, json, std::cout);
+    } else if (args.command == "findings") {
+        status = sp::serialize::JsonExporter::export_findings(inputs, json, std::cout);
     } else if (args.command == "callgraph") {
         status = sp::serialize::JsonExporter::export_call_graph(inputs, json, std::cout);
     } else if (args.command == "disasm" || args.command == "cfg") {

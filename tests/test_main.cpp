@@ -11,6 +11,9 @@ void test_pe_format();
 void test_cfg_builder();
 void test_json_exporter();
 void test_call_graph();
+void test_strings();
+void test_api_classifier();
+void test_reachability();
 
 int main()
 {
@@ -23,6 +26,9 @@ int main()
     test_cfg_builder();
     test_json_exporter();
     test_call_graph();
+    test_strings();
+    test_api_classifier();
+    test_reachability();
 
     const auto& failures = sp::test::failures();
     if (failures.empty()) {

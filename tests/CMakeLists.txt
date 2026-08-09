@@ -19,6 +19,8 @@ add_executable(sp_tests
     "test_cfg_builder.cpp"
     "test_json_exporter.cpp"
     "test_call_graph.cpp"
+    "test_strings.cpp"
+    "test_reachability.cpp"
 )
 
 target_link_libraries(sp_tests PRIVATE sp_engine)

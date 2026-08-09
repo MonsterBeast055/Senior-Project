@@ -12,6 +12,9 @@
 #include "analysis/Function.h"
 #include "analysis/FunctionDiscovery.h"
 #include "analysis/LoopAnalysis.h"
+#include "analysis/FunctionSummarizer.h"
+#include "analysis/Reachability.h"
+#include "analysis/StringExtractor.h"
 #include "analysis/SymbolTable.h"
 #include "analysis/XrefTable.h"
 #include "core/Error.h"
@@ -33,6 +36,13 @@ struct PipelineOptions {
     analysis::FunctionDiscoveryOptions discovery;
     analysis::CFGBuildOptions cfg;
 
+    analysis::StringExtractionOptions strings;
+
+    bool extract_strings = true;
+    bool summarize_functions = true;
+    analysis::ReachabilityOptions reachability;
+
+    bool analyze_reachability = true;
     bool build_xrefs = true;
     bool build_call_graph = true;
     bool run_structural_analysis = true;
@@ -43,6 +53,9 @@ struct PipelineStats {
     analysis::CFGBuildStats cfg;
     std::size_t functions_found = 0;
     std::size_t xrefs_found = 0;
+    std::size_t strings_found = 0;
+    std::size_t risky_operations = 0;
+    std::size_t reachable_operations = 0;
     double analysis_seconds = 0.0;
 };
 
@@ -73,6 +86,8 @@ public:
     const analysis::SymbolTable& symbols() const { return symbols_; }
     const analysis::XrefTable& xrefs() const { return xrefs_; }
     const analysis::CallGraph& call_graph() const { return call_graph_; }
+    const analysis::StringExtractor& strings() const { return strings_; }
+    const analysis::Reachability& reachability() const { return reachability_; }
 
     const std::map<core::VA, analysis::Function>& functions() const { return functions_; }
     const analysis::Function* function_at(core::VA entry) const;
@@ -94,6 +109,8 @@ private:
     analysis::SymbolTable symbols_;
     analysis::XrefTable xrefs_;
     analysis::CallGraph call_graph_;
+    analysis::StringExtractor strings_;
+    analysis::Reachability reachability_;
     std::map<core::VA, analysis::Function> functions_;
 
     PipelineStats stats_;

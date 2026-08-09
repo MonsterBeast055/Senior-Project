@@ -78,6 +78,34 @@ struct Function {
 
     std::size_t instruction_count = 0;
 
+    // --- Consumer-facing summary -----------------------------------------
+
+    // Hash of this function's instruction bytes.
+    //
+    // Exists for the AI layer's cache. Only the engine can compute it, because
+    // only the engine has the bytes - and library code is byte-identical across
+    // binaries, so `memcpy` need only ever be analysed once. This is the single
+    // biggest cost reduction available downstream.
+    std::uint64_t content_hash = 0;
+
+    // Edges - nodes + 2. A cheap difficulty metric, used downstream to route
+    // simple functions to a cheaper model.
+    std::size_t cyclomatic_complexity = 0;
+
+    // Imported APIs this function calls, e.g. "kernel32!CreateFileW".
+    // Resolved through IAT slots, so indirect calls are included. Usually the
+    // most informative single field about what a function does.
+    std::vector<std::string> api_calls;
+
+    // Read-only string literals referenced by this function.
+    std::vector<std::string> referenced_strings;
+
+    // How much there is here worth explaining, 0-100.
+    //
+    // A triage hint so the AI layer does not have to reimplement half of this
+    // analysis in JavaScript to decide what deserves an expensive model call.
+    unsigned information_score = 0;
+
     core::Confidence confidence() const { return provenance.effective_confidence(); }
 };
 

@@ -1,0 +1,1336 @@
+/*
+ * xp.css - Windows XP (Luna) visual language.
+ *
+ * Deliberately plain: no transitions, no animations, no rounded modern cards.
+ * A reverse-engineering tool is read for hours at a time, so the interface
+ * should be dense, predictable and completely static. Ghidra and IDA look the
+ * way they do for the same reason.
+ *
+ * Colour reference:
+ *   #ECE9D8  control face          #316AC5  selection
+ *   #FFFFFF  highlight (top/left)  #ACA899  shadow (bottom/right)
+ *   #0054E3  title bar start       #3D95FF  title bar end
+ */
+
+* {
+    box-sizing: border-box;
+}
+
+html, body {
+    /* min-height, NOT height:100% with overflow:hidden. The original pinned the
+       document to the viewport and hid the overflow, so on any screen smaller
+       than the layout's natural size the content was simply unreachable - no
+       scrollbar, no way to get at it. */
+    min-height: 100%;
+    margin: 0;
+    padding: 0;
+    font-family: Tahoma, "MS Sans Serif", Geneva, sans-serif;
+    font-size: 11px;
+    color: #000000;
+    background: #ECE9D8;
+    /* A dense tool is misread when text is selected by accident while
+       click-navigating. Selection is re-enabled on the code panes only. */
+    user-select: none;
+}
+
+/* --- Window frame ------------------------------------------------------- */
+
+#app {
+    display: flex;
+    flex-direction: column;
+    /* Fixed viewport height on a wide screen, because a disassembler wants its
+       panes pinned and individually scrollable. Below the breakpoints further
+       down this becomes auto height and the document scrolls normally. */
+    height: 100vh;
+    min-height: 0;
+    border: 1px solid #0831D9;
+}
+
+.titlebar {
+    height: 26px;
+    background: linear-gradient(to bottom, #0058EE 0%, #3D95FF 8%, #0054E3 40%,
+                                            #0054E3 88%, #2E8DEF 100%);
+    color: #FFFFFF;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    padding: 0 3px 0 5px;
+    text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.5);
+}
+
+.titlebar .icon {
+    width: 16px;
+    height: 16px;
+    margin-right: 4px;
+    background: #ECE9D8;
+    border: 1px solid #7A96DF;
+    font-size: 9px;
+    line-height: 14px;
+    text-align: center;
+    color: #0054E3;
+    text-shadow: none;
+    font-weight: bold;
+}
+
+.titlebar .spacer { flex: 1; }
+
+/* No minimise/maximise/close rules: the app title bar has no buttons. The
+   browser owns those actions, and ours could only pretend. Floating windows
+   inside the app style their own controls under .floatwin. */
+
+/* --- Menu bar ----------------------------------------------------------- */
+
+.menubar {
+    display: flex;
+    background: #ECE9D8;
+    border-bottom: 1px solid #ACA899;
+    padding: 1px 2px;
+}
+
+.menubar .item {
+    padding: 3px 8px;
+    cursor: default;
+}
+.menubar .item:hover {
+    background: #316AC5;
+    color: #FFFFFF;
+}
+
+/* --- Toolbar ------------------------------------------------------------ */
+
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: #ECE9D8;
+    border-bottom: 1px solid #ACA899;
+    padding: 3px 4px;
+}
+
+.toolbar .sep {
+    width: 1px;
+    height: 18px;
+    margin: 0 4px;
+    border-left: 1px solid #ACA899;
+    border-right: 1px solid #FFFFFF;
+}
+
+button.xp {
+    min-width: 22px;
+    height: 22px;
+    padding: 0 7px;
+    background: #ECE9D8;
+    border: 1px solid;
+    border-color: #FFFFFF #ACA899 #ACA899 #FFFFFF;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: default;
+}
+button.xp:hover  { border-color: #FFFFFF #808080 #808080 #FFFFFF; }
+button.xp:active { border-color: #808080 #FFFFFF #FFFFFF #808080; padding: 1px 6px 0 8px; }
+button.xp:disabled { color: #ACA899; text-shadow: 1px 1px 0 #FFFFFF; }
+
+input.xp, select.xp {
+    height: 20px;
+    padding: 1px 3px;
+    background: #FFFFFF;
+    border: 1px solid;
+    border-color: #808080 #FFFFFF #FFFFFF #808080;
+    font-family: inherit;
+    font-size: 11px;
+    user-select: text;
+}
+
+/* --- Layout ------------------------------------------------------------- */
+
+.workspace {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    padding: 3px;
+    gap: 3px;
+    background: #ECE9D8;
+}
+
+.column {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    gap: 3px;
+}
+
+#col-functions { flex: 0 0 300px; min-width: 240px; }
+#col-center    { flex: 1.5 1 380px; }
+#col-right     { flex: 1 1 320px; }
+
+.bottom-dock {
+    flex: 0 0 200px;
+    min-height: 150px;
+    margin: 0 3px 3px 3px;
+    display: flex;
+    flex-direction: column;
+}
+
+/* The scrollable region inside every panel. Explicit min-height because a
+   nested flex child with only min-height:0 can still be squeezed to nothing. */
+.panel > .body { min-height: 60px; }
+
+/* --- Group box (the XP panel) ------------------------------------------- */
+
+.panel {
+    display: flex;
+    flex-direction: column;
+    /* min-height:0 lets a flex child shrink below content size, which is what
+       makes the inner .body scroll instead of the whole page growing. But it
+       also permits collapse to zero, so a floor is needed too. */
+    min-height: 120px;
+    flex: 1 1 0;
+    background: #ECE9D8;
+    border: 1px solid;
+    border-color: #FFFFFF #ACA899 #ACA899 #FFFFFF;
+}
+
+.panel > .caption {
+    flex: none;
+    padding: 2px 5px;
+    font-weight: bold;
+    background: #ECE9D8;
+    border-bottom: 1px solid #ACA899;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.panel > .caption .hint {
+    font-weight: normal;
+    color: #4A4A4A;
+}
+.panel > .caption .spacer { flex: 1; }
+
+.panel > .body {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    background: #FFFFFF;
+    border: 1px solid;
+    border-color: #808080 #FFFFFF #FFFFFF #808080;
+    margin: 2px;
+}
+
+/* --- Tabs --------------------------------------------------------------- */
+
+.tabstrip {
+    flex: none;
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    padding: 3px 4px 0 4px;
+    border-bottom: 1px solid #ACA899;
+    background: #ECE9D8;
+}
+
+.tab {
+    padding: 3px 12px 4px 12px;
+    background: #ECE9D8;
+    border: 1px solid;
+    border-color: #FFFFFF #ACA899 #ECE9D8 #FFFFFF;
+    border-bottom: none;
+    cursor: default;
+    position: relative;
+    top: 1px;
+}
+.tab.active {
+    font-weight: bold;
+    background: #FFFFFF;
+    padding-bottom: 5px;
+}
+
+.tabpage { display: none; height: 100%; }
+.tabpage.active { display: block; }
+
+/* --- Lists and tables --------------------------------------------------- */
+
+table.grid {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+}
+
+table.grid thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    text-align: left;
+    font-weight: normal;
+    padding: 2px 5px;
+    background: #ECE9D8;
+    border: 1px solid;
+    border-color: #FFFFFF #ACA899 #ACA899 #FFFFFF;
+    cursor: default;
+    white-space: nowrap;
+}
+table.grid thead th.sorted::after { content: " \25BC"; font-size: 8px; }
+
+table.grid tbody td {
+    padding: 1px 5px;
+    border-bottom: 1px solid #F0F0F0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+table.grid tbody tr { cursor: default; }
+table.grid tbody tr:hover { background: #E8F0FE; }
+table.grid tbody tr.selected { background: #316AC5; color: #FFFFFF; }
+table.grid tbody tr.selected .dim { color: #D8E4F8; }
+
+.dim  { color: #6A6A6A; }
+.mono { font-family: "Lucida Console", Consolas, "Courier New", monospace; }
+.num  { text-align: right; }
+
+/* --- Code panes --------------------------------------------------------- */
+
+.code {
+    font-family: "Lucida Console", Consolas, "Courier New", monospace;
+    font-size: 12px;
+    line-height: 15px;
+    white-space: pre;
+    user-select: text;
+}
+
+.code .row { padding: 0 6px; cursor: default; }
+.code .row:hover { background: #F0F4FF; }
+.code .row.highlight { background: #FFF2A8; }
+.code .row.selected  { background: #316AC5; color: #FFFFFF; }
+
+.asm-addr { color: #808080; }
+.asm-bytes { color: #A0A0A0; }
+.asm-mnem { color: #000080; font-weight: bold; }
+.asm-ops  { color: #000000; }
+.asm-api  { color: #008000; }
+.asm-str  { color: #A31515; }
+
+.blockhdr {
+    padding: 2px 6px;
+    margin-top: 4px;
+    background: #ECE9D8;
+    border-top: 1px solid #ACA899;
+    border-bottom: 1px solid #ACA899;
+    font-weight: bold;
+    color: #000080;
+}
+.blockhdr .warn { color: #A00000; font-weight: normal; }
+
+/* --- Severity chips ----------------------------------------------------- */
+
+.sev {
+    display: inline-block;
+    min-width: 62px;
+    padding: 0 4px;
+    text-align: center;
+    border: 1px solid #808080;
+    font-size: 10px;
+}
+.sev.high          { background: #F8C8C8; border-color: #A00000; }
+.sev.medium        { background: #FBE3B0; border-color: #A06000; }
+.sev.low           { background: #FBF6C0; border-color: #808000; }
+.sev.informational { background: #E0E0E0; }
+
+.badge {
+    display: inline-block;
+    padding: 0 3px;
+    border: 1px solid #ACA899;
+    background: #F4F2E8;
+    font-size: 10px;
+    margin-right: 3px;
+}
+.badge.warn { background: #FBE3B0; border-color: #A06000; }
+
+/* --- Graph -------------------------------------------------------------- */
+
+#graph-host {
+    height: 100%;
+    overflow: auto;
+    background: #FFFFFF;
+}
+#graph-host svg { display: block; }
+
+.gnode rect        { fill: #FFFFF0; stroke: #000080; stroke-width: 1; }
+.gnode.entry rect  { stroke-width: 2.5; }
+.gnode.unresolved rect { stroke: #A00000; stroke-dasharray: 4 2; }
+.gnode.selected rect   { fill: #FFF2A8; stroke: #316AC5; stroke-width: 2.5; }
+.gnode text        { font-family: "Lucida Console", Consolas, monospace; font-size: 10px; }
+.gnode .ghdr       { font-weight: bold; fill: #000080; }
+
+.gedge { fill: none; stroke-width: 1.2; }
+.gedge.taken       { stroke: #007000; }
+.gedge.fallthrough { stroke: #707070; }
+.gedge.jump        { stroke: #000080; }
+.gedge.indirect    { stroke: #A06000; stroke-dasharray: 4 2; }
+
+.glabel { font-family: Tahoma, sans-serif; font-size: 9px; fill: #007000; }
+
+.graph-warning {
+    padding: 12px;
+    font-family: Tahoma, sans-serif;
+    font-size: 11px;
+}
+
+/* --- Status bar --------------------------------------------------------- */
+
+.statusbar {
+    flex: none;
+    display: flex;
+    gap: 2px;
+    padding: 2px 3px;
+    background: #ECE9D8;
+    border-top: 1px solid #FFFFFF;
+}
+
+.statusbar .cell {
+    padding: 1px 6px;
+    border: 1px solid;
+    border-color: #ACA899 #FFFFFF #FFFFFF #ACA899;
+    white-space: nowrap;
+}
+.statusbar .cell.grow { flex: 1; }
+
+/* --- Scrollbars (XP had chunky ones; keep them visible) ----------------- */
+
+::-webkit-scrollbar { width: 16px; height: 16px; }
+::-webkit-scrollbar-track { background: #F1EFE2; }
+::-webkit-scrollbar-thumb {
+    background: #ECE9D8;
+    border: 1px solid;
+    border-color: #FFFFFF #ACA899 #ACA899 #FFFFFF;
+}
+::-webkit-scrollbar-corner { background: #F1EFE2; }
+
+/* --- Misc --------------------------------------------------------------- */
+
+.empty {
+    padding: 14px;
+    color: #6A6A6A;
+    font-family: Tahoma, sans-serif;
+}
+
+.notice {
+    margin: 2px;
+    padding: 5px 7px;
+    background: #FFFFE1;
+    border: 1px solid #C0C000;
+    font-family: Tahoma, sans-serif;
+    font-size: 11px;
+    line-height: 1.45;
+}
+.notice b { color: #804000; }
+
+/* ======================================================================
+ * React Flow overrides.
+ *
+ * React Flow ships with rounded nodes, drop shadows and animated edges by
+ * default. All of that is stripped here: this is a tool for reading control
+ * flow, and movement in the periphery while you are tracing a branch is
+ * actively unhelpful.
+ * ====================================================================== */
+
+.react-flow__renderer,
+.react-flow__pane { background: #FFFFFF; }
+
+.react-flow__node {
+    /* No transition. A node that eases into place is a node whose position you
+       cannot trust while clicking. */
+    transition: none !important;
+    font-family: "Lucida Console", Consolas, "Courier New", monospace;
+}
+
+.react-flow__handle {
+    /* Handles are what edges attach to, so they must exist and be positioned -
+       but this graph is read-only, so the dots are hidden and inert.
+       `visibility` rather than `display:none`: a handle that is not laid out has
+       no position, and React Flow would have nowhere to anchor the edge. */
+    opacity: 0;
+    pointer-events: none;
+    width: 1px;
+    height: 1px;
+    min-width: 1px;
+    min-height: 1px;
+    border: none;
+    background: transparent;
+}
+
+.react-flow__edge-path { stroke-width: 1.2; }
+.react-flow__edge.animated .react-flow__edge-path { stroke-dasharray: none; animation: none; }
+
+.react-flow__edge.e-taken       .react-flow__edge-path { stroke: #007000; }
+.react-flow__edge.e-fallthrough .react-flow__edge-path { stroke: #707070; }
+.react-flow__edge.e-jump        .react-flow__edge-path { stroke: #000080; }
+.react-flow__edge.e-indirect    .react-flow__edge-path { stroke: #A06000; stroke-dasharray: 4 2; }
+
+.react-flow__edge-text { font-family: Tahoma, sans-serif; font-size: 9px; fill: #007000; }
+.react-flow__edge-textbg { fill: #FFFFFF; }
+
+.react-flow__controls {
+    box-shadow: none;
+    border: 1px solid;
+    border-color: #FFFFFF #ACA899 #ACA899 #FFFFFF;
+}
+.react-flow__controls-button {
+    background: #ECE9D8;
+    border-bottom: 1px solid #ACA899;
+    width: 20px;
+    height: 20px;
+}
+.react-flow__controls-button svg { fill: #000000; }
+
+.react-flow__minimap {
+    border: 1px solid;
+    border-color: #ACA899 #FFFFFF #FFFFFF #ACA899;
+}
+
+.react-flow__attribution { display: none; }
+
+/* --- Custom block node -------------------------------------------------- */
+
+.blocknode {
+    background: #FFFFF0;
+    border: 1px solid #000080;
+    font-size: 10px;
+    line-height: 13px;
+    cursor: default;
+    overflow: hidden;
+}
+.blocknode.entry      { border-width: 2px; }
+.blocknode.unresolved { border-color: #A00000; border-style: dashed; }
+.blocknode.selected   { background: #FFF2A8; border-color: #316AC5; border-width: 2px; }
+
+.blocknode .bn-head {
+    padding: 1px 5px;
+    font-weight: bold;
+    color: #000080;
+    background: #F2F2E2;
+    border-bottom: 1px solid #C8C8B0;
+    white-space: nowrap;
+}
+.blocknode .bn-body { padding: 2px 5px; white-space: pre; }
+.blocknode .bn-more { color: #808080; }
+.blocknode .bn-warn { color: #A00000; }
+
+/* --- Decompiler / n8n panel -------------------------------------------- */
+
+.lift-bar {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 4px;
+    background: #ECE9D8;
+    border-bottom: 1px solid #ACA899;
+}
+.lift-state {
+    padding: 0 5px;
+    border: 1px solid #ACA899;
+    background: #F4F2E8;
+    font-size: 10px;
+}
+.lift-state.running { background: #FBE3B0; border-color: #A06000; }
+.lift-state.done    { background: #D8F0D8; border-color: #007000; }
+.lift-state.failed  { background: #F8C8C8; border-color: #A00000; }
+
+/* ======================================================================
+ * Views: upload, reports, overview
+ * ====================================================================== */
+
+.viewnav {
+    display: flex;
+    gap: 2px;
+    padding: 3px 4px 0 4px;
+    background: #ECE9D8;
+    border-bottom: 1px solid #ACA899;
+}
+.viewnav .vtab {
+    padding: 4px 14px;
+    background: #ECE9D8;
+    border: 1px solid;
+    border-color: #FFFFFF #ACA899 #ECE9D8 #FFFFFF;
+    border-bottom: none;
+    cursor: default;
+    position: relative;
+    top: 1px;
+}
+.viewnav .vtab.active { font-weight: bold; background: #FFFFFF; padding-bottom: 6px; }
+.viewnav .vtab.disabled { color: #ACA899; text-shadow: 1px 1px 0 #FFFFFF; }
+
+/* Backend reachability indicator. A square dot rather than a round one, and no
+   pulse or fade: the XP look has no animation and a blinking status light would
+   read as an alarm. Colour plus text, so it is not colour-alone. */
+.health {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+.health .dot {
+    width: 7px;
+    height: 7px;
+    border: 1px solid;
+    /* Inset border, matching every other sunken element in this stylesheet. */
+    border-color: #808080 #FFFFFF #FFFFFF #808080;
+}
+.health.up   { color: #205020; }
+.health.up   .dot { background: #3F9F3F; }
+.health.warn { color: #7A5A00; }
+.health.warn .dot { background: #E8B200; }
+.health.down { color: #8B0000; }
+.health.down .dot { background: #C43030; }
+
+/* A scrolling document page, as opposed to the pinned analysis workspace. */
+.page {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 14px;
+    background: #ECE9D8;
+}
+.page-inner { max-width: 940px; margin: 0 auto; }
+
+.page h1 { font-size: 15px; margin: 0 0 3px 0; }
+.page h2 { font-size: 12px; margin: 18px 0 6px 0; }
+.page p  { margin: 4px 0 10px 0; line-height: 1.5; max-width: 70ch; }
+
+/* --- Drop zone ---------------------------------------------------------- */
+
+.dropzone {
+    padding: 34px 20px;
+    text-align: center;
+    background: #FFFFFF;
+    border: 2px dashed #ACA899;
+    cursor: default;
+}
+.dropzone.over { border-color: #316AC5; background: #F0F4FF; }
+.dropzone .big { font-size: 13px; font-weight: bold; margin-bottom: 6px; }
+.dropzone .sub { color: #6A6A6A; }
+
+.filecard {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    background: #FFFFFF;
+    border: 1px solid;
+    border-color: #808080 #FFFFFF #FFFFFF #808080;
+}
+.filecard .name { font-weight: bold; }
+
+/* XP progress bar: discrete blocks, no gradient sweep, no animation. */
+.progress {
+    height: 18px;
+    padding: 2px;
+    background: #FFFFFF;
+    border: 1px solid;
+    border-color: #808080 #FFFFFF #FFFFFF #808080;
+    overflow: hidden;
+}
+.progress .fill {
+    height: 100%;
+    background: repeating-linear-gradient(
+        to right, #3D95FF 0 9px, #ECE9D8 9px 11px);
+}
+
+.steplist { margin: 8px 0 0 0; padding: 0; list-style: none; }
+.steplist li { padding: 2px 0; }
+.steplist .mark { display: inline-block; width: 16px; font-weight: bold; }
+.steplist li.done    .mark { color: #007000; }
+.steplist li.active  .mark { color: #A06000; }
+.steplist li.pending { color: #909090; }
+
+/* --- Overview cards ----------------------------------------------------- */
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+    gap: 6px;
+    margin-bottom: 8px;
+}
+.card {
+    padding: 6px 8px;
+    background: #FFFFFF;
+    border: 1px solid;
+    border-color: #FFFFFF #ACA899 #ACA899 #FFFFFF;
+}
+.card .k { color: #4A4A4A; font-size: 10px; text-transform: uppercase; }
+.card .v { font-size: 17px; font-weight: bold; font-family: Tahoma, sans-serif; }
+.card .n { color: #6A6A6A; font-size: 10px; }
+.card.alert .v { color: #A00000; }
+
+/* Coverage / entropy bar. Static width, no transition. */
+.meter {
+    height: 9px;
+    margin-top: 3px;
+    background: #FFFFFF;
+    border: 1px solid #808080;
+}
+.meter .bar   { height: 100%; background: #3D95FF; }
+.meter .bar.warn { background: #EF9F27; }
+.meter .bar.bad  { background: #E24B4A; }
+
+/* ======================================================================
+ * Responsive
+ *
+ * A three-column disassembler needs width. Rather than shrink everything into
+ * unreadability, each breakpoint drops a column and moves its content into a
+ * tab strip that was already there.
+ * ====================================================================== */
+
+/* Below this the Decompiler cannot hold a line of C without wrapping, so it
+   joins the centre pane as a third tab. */
+@media (max-width: 1180px) {
+    #col-right { display: none; }
+    #col-center { flex: 1 1 auto; }
+    #col-functions { flex: 0 0 250px; }
+}
+
+/* Below this the function list becomes a tab too, and the app stops being a
+   pinned-viewport application and becomes a scrolling document. */
+@media (max-width: 860px) {
+    html, body { overflow-y: auto; }
+
+    #app { height: auto; min-height: 100vh; }
+
+    .workspace { flex-direction: column; }
+    #col-functions { display: none; }
+    #col-center { flex: none; min-height: 440px; }
+
+    .bottom-dock { flex: none; min-height: 300px; }
+
+    .toolbar { flex-wrap: wrap; row-gap: 3px; }
+    .toolbar .sep { display: none; }
+
+    /* Status bar cells wrap rather than overflowing off-screen. */
+    .statusbar { flex-wrap: wrap; row-gap: 2px; }
+    .statusbar .cell.grow { flex: 1 1 100%; }
+
+    .page { padding: 10px; }
+}
+
+@media (max-width: 560px) {
+    body { font-size: 12px; }
+    .code { font-size: 11px; }
+    .cards { grid-template-columns: 1fr 1fr; }
+    /* Tables in the dock scroll sideways instead of squashing their columns. */
+    .panel > .body { overflow-x: auto; }
+    table.grid { min-width: 460px; }
+}
+
+/* Very short windows: give the dock less and the main panes more. */
+@media (max-height: 720px) and (min-width: 861px) {
+    .bottom-dock { flex: 0 0 150px; min-height: 120px; }
+}
+
+@media print {
+    .toolbar, .viewnav, .menubar, .titlebar, .bottom-dock { display: none; }
+    #app { height: auto; border: none; }
+}
+
+/* ======================================================================
+ * Symbol tree
+ *
+ * XP Explorer / Ghidra Symbol Tree: square [+]/[-] toggles, dotted indent
+ * guides, text-only icons. Dense rows — 16px — because the point of a tree is
+ * seeing many items at once.
+ * ====================================================================== */
+
+.tree { padding: 2px 0; }
+
+.tnode {
+    display: flex;
+    align-items: center;
+    height: 16px;
+    padding-right: 6px;
+    cursor: default;
+    white-space: nowrap;
+}
+.tnode:hover { background: #E8F0FE; }
+.tnode.selected { background: #316AC5; color: #FFFFFF; }
+.tnode.selected .tcount,
+.tnode.selected .tmeta { color: #D8E4F8; }
+
+/* The [+]/[-] box. A fixed 13px slot so leaves line up with branches. */
+.ttoggle {
+    flex: none;
+    width: 13px;
+    height: 13px;
+    margin-right: 3px;
+    line-height: 11px;
+    text-align: center;
+    font-family: "Courier New", monospace;
+    font-size: 11px;
+    font-weight: bold;
+    color: #000000;
+    background: #FFFFFF;
+    border: 1px solid #808080;
+}
+.ttoggle.empty { visibility: hidden; }
+
+.ticon {
+    flex: none;
+    width: 15px;
+    font-size: 10px;
+    text-align: center;
+    color: #806000;
+}
+.ticon.fn   { color: #000080; }
+.ticon.imp  { color: #006060; }
+.ticon.str  { color: #A31515; }
+.ticon.find { color: #A00000; }
+.ticon.sect { color: #505050; }
+
+.tlabel { overflow: hidden; text-overflow: ellipsis; }
+.tlabel.mono { font-family: "Lucida Console", Consolas, monospace; }
+
+.tcount { margin-left: 5px; color: #6A6A6A; font-size: 10px; }
+.tmeta  { margin-left: auto; padding-left: 8px; color: #6A6A6A; font-size: 10px; }
+
+/* Dotted guide, drawn per indent level. */
+.tindent {
+    flex: none;
+    width: 13px;
+    height: 16px;
+    background-image: linear-gradient(to bottom,
+        #C0C0C0 0, #C0C0C0 1px, transparent 1px, transparent 2px);
+    background-size: 1px 2px;
+    background-position: 6px 0;
+    background-repeat: repeat-y;
+}
+
+/* ======================================================================
+ * Floating window
+ *
+ * A movable panel, deliberately not an <iframe>. An iframe is a separate
+ * document, so the graph inside it could not share selection state with the
+ * listing - the click-to-highlight sync is the whole point of the layout.
+ * ====================================================================== */
+
+.floatwin {
+    position: fixed;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    background: #ECE9D8;
+    border: 1px solid #0831D9;
+    /* One shadow, static. Enough to read as "above" without decoration. */
+    box-shadow: 3px 3px 0 rgba(0, 0, 0, 0.22);
+    min-width: 320px;
+    min-height: 200px;
+}
+
+.floatwin .fw-title {
+    flex: none;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0 3px 0 6px;
+    background: linear-gradient(to bottom, #0058EE 0%, #3D95FF 8%, #0054E3 40%,
+                                            #0054E3 88%, #2E8DEF 100%);
+    color: #FFFFFF;
+    font-weight: bold;
+    text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.5);
+    /* grab, not move: this is a window title bar, not a canvas. */
+    cursor: grab;
+    user-select: none;
+}
+.floatwin .fw-title.dragging { cursor: grabbing; }
+.floatwin .fw-title .fw-hint { font-weight: normal; font-size: 10px; opacity: 0.85; }
+
+.floatwin .fw-btn {
+    width: 19px;
+    height: 17px;
+    border: 1px solid #FFFFFF;
+    background: #2E8DEF;
+    color: #FFFFFF;
+    font-size: 10px;
+    font-weight: bold;
+    cursor: default;
+    padding: 0;
+}
+.floatwin .fw-btn.close { background: #D64330; }
+
+.floatwin .fw-body {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    background: #FFFFFF;
+    border: 1px solid;
+    border-color: #808080 #FFFFFF #FFFFFF #808080;
+    margin: 2px;
+}
+
+/* Resize grip, bottom-right, drawn with the XP diagonal hatch. */
+.floatwin .fw-grip {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 15px;
+    height: 15px;
+    cursor: nwse-resize;
+    background-image:
+        linear-gradient(135deg, transparent 0 45%, #ACA899 45% 55%, transparent 55% 100%),
+        linear-gradient(135deg, transparent 0 70%, #ACA899 70% 80%, transparent 80% 100%);
+}
+
+/* While dragging, stop text selection and pointer events leaking into panes. */
+body.dragging-window, body.dragging-window * {
+    user-select: none !important;
+    cursor: inherit !important;
+}
+
+/* ======================================================================
+ * Compact metrics strip
+ *
+ * Replaces the overview cards. Same numbers, one line, so the assembly and
+ * decompiler panes get the vertical space instead.
+ * ====================================================================== */
+
+.metrics {
+    flex: none;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0;
+    padding: 0 3px;
+    background: #ECE9D8;
+    border-top: 1px solid #FFFFFF;
+    border-bottom: 1px solid #ACA899;
+}
+
+.metrics .m {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+    padding: 2px 8px;
+    border-right: 1px solid #D8D5C5;
+    white-space: nowrap;
+}
+.metrics .m .mk { color: #4A4A4A; font-size: 10px; }
+.metrics .m .mv { font-weight: bold; }
+.metrics .m.alert .mv { color: #A00000; }
+.metrics .m.warn  .mv { color: #A06000; }
+
+/* Inline meter, sized to sit on one text line. */
+.metrics .minibar {
+    width: 42px;
+    height: 7px;
+    background: #FFFFFF;
+    border: 1px solid #808080;
+}
+.metrics .minibar > i { display: block; height: 100%; background: #3D95FF; }
+.metrics .minibar > i.warn { background: #EF9F27; }
+.metrics .minibar > i.bad  { background: #E24B4A; }
+
+.metrics .spacer { flex: 1; border-right: none; }
+
+/* Collapsed dock: caption bar only. */
+.bottom-dock.collapsed { flex: 0 0 auto; min-height: 0; }
+.bottom-dock.collapsed .panel { min-height: 0; }
+.bottom-dock.collapsed .panel > .body { display: none; }
+
+@media (max-width: 860px) {
+    .floatwin { min-width: 260px; }
+    .metrics .m { padding: 2px 6px; }
+}
+
+/* ======================================================================
+ * Menu bar with working dropdowns, and the global search
+ * ====================================================================== */
+
+.menubar { position: relative; z-index: 30; align-items: center; }
+
+.menubar .item.open {
+    background: #316AC5;
+    color: #FFFFFF;
+}
+
+.menu-pop {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    min-width: 210px;
+    padding: 2px;
+    background: #FFFFFF;
+    border: 1px solid #ACA899;
+    /* One static shadow. XP menus had exactly this and nothing more. */
+    box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.2);
+    z-index: 31;
+}
+
+.menu-pop .mi {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 8px 3px 22px;
+    cursor: default;
+    white-space: nowrap;
+}
+.menu-pop .mi:hover { background: #316AC5; color: #FFFFFF; }
+.menu-pop .mi.disabled { color: #ACA899; }
+.menu-pop .mi.disabled:hover { background: transparent; color: #ACA899; }
+.menu-pop .mi .accel { margin-left: auto; padding-left: 18px; color: #6A6A6A; }
+.menu-pop .mi:hover .accel { color: #D8E4F8; }
+.menu-pop .mi.checked::before { content: "\2713"; position: absolute; margin-left: -14px; }
+.menu-pop .msep { height: 1px; margin: 3px 2px; background: #ACA899; }
+
+/* Invisible click-catcher so clicking anywhere closes an open menu. */
+.menu-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 29;
+}
+
+/* --- Global search ----------------------------------------------------- */
+
+.globalsearch {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+    padding-right: 4px;
+}
+
+.searchpop {
+    position: absolute;
+    top: 100%;
+    right: 4px;
+    width: 420px;
+    max-height: 320px;
+    overflow: auto;
+    background: #FFFFFF;
+    border: 1px solid #ACA899;
+    box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.2);
+    z-index: 31;
+}
+
+.searchpop .sgroup {
+    padding: 2px 6px;
+    background: #ECE9D8;
+    border-bottom: 1px solid #ACA899;
+    font-weight: bold;
+    color: #4A4A4A;
+}
+.searchpop .sitem {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    padding: 2px 8px;
+    cursor: default;
+}
+.searchpop .sitem:hover,
+.searchpop .sitem.active { background: #316AC5; color: #FFFFFF; }
+.searchpop .sitem:hover .dim,
+.searchpop .sitem.active .dim { color: #D8E4F8; }
+.searchpop .sitem .skind {
+    flex: none;
+    width: 52px;
+    font-size: 10px;
+    color: #6A6A6A;
+}
+.searchpop .sitem:hover .skind,
+.searchpop .sitem.active .skind { color: #D8E4F8; }
+
+@media (max-width: 860px) {
+    /* The menu bar was hidden entirely at this width before, which also removed
+       the only route to the actions in it. Keep it, and let the search shrink. */
+    .menubar { display: flex; flex-wrap: wrap; }
+    .globalsearch { margin-left: 0; width: 100%; padding: 2px 4px; }
+    .globalsearch input { flex: 1; }
+    .searchpop { width: auto; left: 4px; right: 4px; }
+}
+
+@media (max-width: 560px) {
+    /* Reinstated: previously `display: none`, which made File/View/Analysis
+       unreachable on a phone. Compressed instead. */
+    .menubar { display: flex; }
+    .menubar .item { padding: 3px 6px; }
+    .menu-pop { min-width: 180px; }
+}
+
+/* --- Explain popups ----------------------------------------------------- */
+
+/* A hover panel, not a tooltip. `title` cannot be formatted, truncates, and waits
+   a second to appear — useless for showing arithmetic. */
+.explain-host { position: relative; display: inline-block; }
+
+/* A dotted underline is the only cue. An icon would add clutter to every row in a
+   list of hundreds; this reads as "there is more here" without taking space. */
+.explain-cue { border-bottom: 1px dotted #808080; cursor: help; }
+
+.explain-pop {
+    /* fixed, not absolute: these live inside scrolling panels, and an absolutely
+       positioned child of an overflow:auto container gets clipped by it. Position
+       is computed in Explain.tsx and clamped to the viewport. */
+    position: fixed;
+    z-index: 60;
+    width: 320px;
+    max-height: 70vh;
+    overflow: auto;
+    padding: 0;
+    background: #FFFFE1;
+    border: 1px solid #767676;
+    /* The one shadow in the stylesheet. A popup overlapping dense text needs to
+       read as floating above it, and XP tooltips had exactly this. */
+    box-shadow: 2px 2px 3px rgba(0, 0, 0, 0.25);
+    text-align: left;
+    white-space: normal;
+    cursor: default;
+    font-weight: normal;
+}
+
+.explain-title {
+    padding: 3px 6px;
+    font-weight: bold;
+    background: #ECE9D8;
+    border-bottom: 1px solid #ACA899;
+}
+.explain-body { padding: 5px 6px 6px 6px; }
+
+.explain-lead { margin: 0 0 5px 0; line-height: 1.4; }
+.explain-foot { margin: 5px 0 0 0; color: #4A4A4A; line-height: 1.4; }
+.explain-warn {
+    margin: 5px 0 0 0;
+    padding: 3px 5px;
+    background: #FBF6C0;
+    border: 1px solid #C0B040;
+    line-height: 1.4;
+}
+
+.explain-row {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    padding: 1px 0;
+}
+.explain-row.strong {
+    font-weight: bold;
+    border-top: 1px solid #D8D4C0;
+    margin-top: 2px;
+    padding-top: 2px;
+}
+.explain-row .el { flex: 1; min-width: 0; }
+.explain-row .ev { font-family: "Lucida Console", monospace; }
+.explain-row .en { color: #6A6A6A; font-size: 10px; flex: none; }
+
+/* --- Findings box ------------------------------------------------------- */
+
+/* Card rows rather than a table. At 260px a table would need horizontal scroll to
+   show severity, source, API and function together; stacking them into two lines
+   per finding fits and stays scannable. The full detail is one click away in the
+   finding window, which is where it belonged anyway. */
+.findingsbox {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+}
+
+.fbfilters {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px 4px;
+    border-bottom: 1px solid #ACA899;
+    background: #ECE9D8;
+    /* No wrapping: the filter row must stay one line tall so the list below keeps
+       its height. Labels are short enough to fit; the meaning is in the tooltip. */
+    flex-wrap: nowrap;
+    white-space: nowrap;
+}
+/* Just the number. The word "impactful" is in the tooltip and in the panel
+   caption; repeating it here is what pushed the filters off the row. */
+.fbimpact { flex: none; }
+.fbfilter {
+    padding: 1px 6px;
+    border: 1px solid #ECE9D8;
+    cursor: default;
+}
+.fbfilter:hover  { border-color: #FFFFFF #ACA899 #ACA899 #FFFFFF; }
+.fbfilter.active {
+    font-weight: bold;
+    background: #FFFFFF;
+    border-color: #808080 #FFFFFF #FFFFFF #808080;
+}
+
+.fblist {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    background: #FFFFFF;
+}
+
+.fbrow {
+    padding: 3px 5px 4px 5px;
+    border-bottom: 1px solid #F0F0F0;
+    cursor: default;
+}
+.fbrow:hover { background: #F2F6FC; }
+.fbrow.selected { background: #D8E6F8; }
+
+.fbhead {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    /* One line. Badges are pushed right and the kind absorbs the slack, so a long
+       kind truncates instead of wrapping the badges onto a second line. */
+    flex-wrap: nowrap;
+    overflow: hidden;
+}
+.fbkind {
+    font-weight: bold;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.fbhead > .badge, .fbhead > .fbsrc, .fbhead > .sev { flex: none; }
+.fbmeta {
+    color: #4A4A4A;
+    margin-top: 1px;
+    display: flex;
+    align-items: baseline;
+    gap: 3px;
+    min-width: 0;
+}
+/* The function name is the part worth clipping; the API name is the identifying
+   half and should survive. */
+.fbmeta .fbfn {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.fbdetail {
+    margin-top: 2px;
+    color: #333333;
+    /* Model prose can run long. Three lines is enough to judge whether to open it,
+       and a caller list that scrolls for a paragraph per row is unusable. */
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+/* Inline in the meta line rather than a row of its own: a dedicated line per
+   finding cost a third of the list's height. */
+.fbwhy {
+    flex: none;
+    height: 16px;
+    min-width: 0;
+    padding: 0 4px;
+    font-size: 10px;
+}
+
+/* Source tag. Engine and AI are visually distinct because the whole point of one
+   merged list is telling at a glance which side said what. */
+.fbsrc {
+    padding: 0 4px;
+    font-size: 10px;
+    border: 1px solid;
+    border-color: #FFFFFF #ACA899 #ACA899 #FFFFFF;
+}
+.fbsrc.engine { background: #E4EEDA; color: #2C4A1E; }
+.fbsrc.ai     { background: #E6E0F0; color: #3B2A5A; }
+
+.fbfoot {
+    flex: none;
+    padding: 3px 5px;
+    border-top: 1px solid #ACA899;
+    background: #ECE9D8;
+}
+
+/* The left column now holds two panels, so neither may claim all the height.
+   Findings get the smaller share: the tree is navigated constantly, findings are
+   read in bursts. Both scroll independently. */
+#col-functions > .panel:first-child { flex: 1.4 1 0; min-height: 140px; }
+#col-functions > .panel:last-child  { flex: 1 1 0;   min-height: 130px; }
+
+/* When the left column is hidden and the box moves into the centre tab strip, it
+   no longer has a Panel sizing it. height:100% against an auto-height parent
+   resolves to nothing, so the list would render zero pixels tall. */
+@media (max-width: 860px) {
+    .findingsbox { height: auto; min-height: 300px; }
+    .fblist { max-height: none; }
+}
+
+/* --- Automated run ------------------------------------------------------ */
+
+.autorun { margin: 8px 0; }
+.autorun .steplist li { margin-bottom: 6px; }
+
+/* --- AI Analysis view --------------------------------------------------- */
+
+/* Two columns: the symbol tree, and the panes. The tree is pinned and scrolls on
+   its own (same behaviour as the Analysis tab, so switching tabs does not change
+   how navigation feels); the right side scrolls as a document because a behaviour
+   profile is long. */
+.aipage {
+    flex: 1;
+    display: flex;
+    min-height: 0;
+    gap: 3px;
+    padding: 3px;
+    background: #ECE9D8;
+}
+.aitree {
+    flex: 0 0 260px;
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.aipage > .aiwin {
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+    padding: 10px 14px 14px 14px;
+    background: #ECE9D8;
+}
+/* Below this the tree would leave nothing for the panes, so it stacks instead. */
+@media (max-width: 860px) {
+    .aipage { flex-direction: column; }
+    .aitree { flex: 0 0 190px; }
+}
+
+/* No height or overflow of its own: it lives inside .page / .page-inner, which
+   already scroll. Giving it height:100% and overflow:auto (correct when this was
+   a floating window) would nest a second scroll container and clip the behaviour
+   profile at one viewport. */
+.aiwin {
+    display: flex;
+    flex-direction: column;
+    padding-bottom: 12px;
+}
+.aiwin h3 { font-size: 11px; font-weight: bold; }
+.aiwin .toolbar { padding: 3px 0; background: transparent; }
+.aiwin .grid { margin-top: 3px; }
+
+/* Decompiled C. Monospace, sunken, wraps rather than scrolls sideways -
+   horizontal scrolling in a small window makes code unreadable. */
+.aiwin pre.code {
+    margin: 4px 0;
+    padding: 6px 8px;
+    background: #FFFFFF;
+    border: 1px solid;
+    border-color: #808080 #FFFFFF #FFFFFF #808080;
+    font-family: "Lucida Console", "Courier New", monospace;
+    font-size: 11px;
+    line-height: 1.35;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-x: auto;
+}
+
+/* Xref window: same idea, its own scroll. */
+.xrefwin {
+    padding: 8px;
+    overflow: auto;
+    height: 100%;
+    box-sizing: border-box;
+}

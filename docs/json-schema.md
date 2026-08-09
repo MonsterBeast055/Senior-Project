@@ -83,7 +83,18 @@ Diagnostics always go to stderr, so stdout is always clean JSON.
     "unclaimed_ranges": [
       { "start": "0x140021a00", "end": "0x140021c40", "size": 576 }
     ]
-  }
+  },
+  "strings": [
+    {
+      "address": "0x14001a2f0",
+      "encoding": "utf16",
+      "text": "Software\\Microsoft\\Notepad",
+      "length": 25,
+      "truncated": false,
+      "refs": 3,
+      "library_only": false
+    }
+  ]
 }
 ```
 
@@ -94,6 +105,78 @@ ranges in the UI rather than pretending the analysis is complete.
 
 `iat_slot` is the address an indirect call actually reads. It is how
 `call qword [rip+0x1234]` gets resolved to `KERNEL32.dll!CreateFileW`.
+
+### `api_xrefs` and `string_xrefs`
+
+The reverse direction of a function's `api_calls` and `referenced_strings`.
+
+```jsonc
+"api_xrefs": [
+  { "api": "ADVAPI32.dll!RegSetValueExW", "count": 2,
+    "functions": [ { "va": "0x1400023a0", "name": "NPInit" },
+                   { "va": "0x140002418", "name": "NPSaveSettings" } ] }
+],
+"string_xrefs": [
+  { "address": "0x14001a2f0", "count": 1,
+    "functions": [ { "va": "0x1400023a0", "name": "NPInit" } ] }
+]
+```
+
+`api` is spelled `library!name`, identical to a finding's `api` field and to the
+key a UI builds from an `imports` entry — the three must agree or a lookup silently
+returns nothing.
+
+These exist because the question worth asking about an import is never "where does
+it live" (an IAT slot in `.idata`, holding a pointer, not code) but "who calls it" —
+which is the question that leads to a finding. A consumer cannot derive this
+itself: `functions.json` emits `api_call_count`, not the list, and fetching all
+1700 per-function documents to build an index is not a reasonable alternative.
+
+`string_xrefs` resolves each referring *instruction* address to its containing
+function using declared extents. A function whose `extent_end` is unknown absorbs
+references after it, so a count can be attributed slightly too generously in that
+case — never too narrowly.
+
+### `strings`
+
+Every string the engine recovered, image-wide. The same data appears per function
+as `referenced_strings`; this is that data indexed the other way, so a Strings pane
+can be populated without loading every function document — on a 1700-function DLL
+that is the difference between one request and 1700.
+
+`encoding` is `"ascii"` or `"utf16"`, and `text` is always UTF-8 regardless: UTF-16
+sources are transcoded so a consumer never has to care which they came from.
+`length` is the length in characters *before* truncation, so a clipped string is
+identifiable (`truncated: true`) and its real size still known. `refs` is how many
+instructions reference the address — a string referenced from several places is
+usually a format string or a registry path, and worth more attention than one
+referenced once.
+
+`library_only` is true when every function referencing the string is library code.
+These strings are real — `(null)`, `.exe`, `ERROR: Unable to initialize heap` are
+MSVC C-runtime literals genuinely present in the binary — but they are identical in
+every binary built with MSVC and say nothing about the program under analysis. Fold
+them away by default; do not drop them, because "the CRT is present" is occasionally
+the fact you want. A string with no resolvable owning function is left `false`:
+unclassified, not library.
+
+**UTF-16 plausibility.** `printable_only` accepts any code point from `0xA0` up,
+which is far too weak for UTF-16 — any two bytes in `0x4E00`–`0x9FFF` form a
+perfectly printable CJK ideograph, so pointer tables and instruction bytes decoded
+as fluent Chinese. Four additional tests now apply, all configurable in
+`StringExtractionOptions`:
+
+| test | option | rationale |
+| --- | --- | --- |
+| even start address | `utf16_require_alignment` | compilers align wide literals |
+| at most N non-ASCII script groups | `max_script_groups` | real text stays in one script; misread bytes wander |
+| all-non-ASCII strings need extra length | `min_length_non_ascii` | short all-CJK runs are the bulk of false positives |
+| no private-use, noncharacters or unpaired surrogates | always | never valid in a real literal |
+
+These are heuristics, not proofs, and they are deliberately not "reject CJK" — a
+Japanese-language application legitimately contains Japanese. `tests/test_strings.cpp`
+asserts both directions: real Japanese, Cyrillic and accented Latin survive; phantom
+CJK, scattered scripts, pointer tables and lone surrogates do not.
 
 ## Function list (`sp functions`, `functions.json`)
 
@@ -305,15 +388,174 @@ the prompt contract from day one; it is nearly impossible to retrofit.
 `has_unresolved_exit` so it can hedge instead of confidently describing a bad
 decode.
 
+## Fields for the AI layer
+
+These live on both the function summary and the function detail document, and
+they exist specifically so the n8n layer does not have to reimplement analysis in
+JavaScript.
+
+**`content_hash`** (integer) — hash of the function's instruction sequence.
+**Use this as your cache key.** It is computed from mnemonics and instruction
+lengths rather than raw bytes, so the same library function compiled into two
+different binaries hashes identically. CRT and library code is a large fraction
+of any binary, so caching on this is the single biggest cost reduction available.
+
+**`information_score`** (0–100) — how much there is here worth explaining.
+Derived from API calls, referenced strings, size, branching and caller count.
+Returns 0 for thunks, import stubs, and tiny featureless functions. **Threshold on
+this to decide what gets a model call at all.**
+
+**`cyclomatic_complexity`** — edges − nodes + 2. Route low values to a cheaper
+model.
+
+**`api_calls`** (array of strings) — imported APIs this function calls, e.g.
+`"kernel32!CreateFileW"`. **Resolved through IAT slots**, so indirect calls are
+included — which matters, because nearly every Windows API call compiles to
+`call qword [rip+N]` rather than a direct call. Usually the most informative
+single field about what a function does.
+
+**`referenced_strings`** (array of strings) — read-only string literals this
+function references, decoded from ASCII or UTF-16 and always returned as UTF-8.
+Often more decisive about purpose than the whole instruction listing. A function
+referencing `SOFTWARE\Microsoft\Windows\CurrentVersion\Run` is identifiable at a
+glance.
+
+**`is_library_code`** (bool) — matched a known library signature. Currently always
+`false`; signature matching is not implemented yet.
+
+Also new at the instruction level:
+
+**`memory_ref`** (hex string or null) — absolute address of a statically-known
+memory operand. Set for rip-relative and absolute displacements, null when the
+address is computed from registers at runtime. This is what string references and
+IAT-slot resolution are built on.
+
+**`target_name`** now resolves indirect calls too. For `call qword [rip+0x1f0ce]`
+it returns the imported symbol behind that IAT slot rather than null.
+
+## Suggested n8n pipeline
+
+Ordered so the cheap deterministic steps run before anything expensive:
+
+```
+1. Cache lookup        by content_hash            skip if seen
+2. Triage              information_score, size    skip / cheap / expensive
+3. Prompt build        render the bundle to text  Code node, not an LLM
+4. Lifting agent       LLM
+5. Deterministic check api_calls present?         free, catches most errors
+                       every line_mapping block exists?
+6. Validator agent     LLM, only for survivors
+7. Store
+```
+
+Steps 1, 2, 3 and 5 need no model at all. Getting those right is worth more than
+any prompt tuning.
+
+## Findings (`sp findings`, `findings.json`)
+
+Risky operations and whether untrusted input can reach them.
+
+```json
+{
+  "schema_version": "1.0",
+  "methodology": {
+    "analysis": "call-graph reachability",
+    "value_level_dataflow": false,
+    "proves_exploitability": false,
+    "note": "Findings identify risky operations and whether a call path exists..."
+  },
+  "input_sources": [
+    { "function": "0x140001080", "function_name": "sub_140001080",
+      "api": "api-ms-win-core-file-l1-1-0.dll!ReadFile", "source": "file" }
+  ],
+  "findings": [
+    {
+      "function": "0x140003000",
+      "function_name": "sub_140003000",
+      "api": "msvcrt.dll!strcpy",
+      "kind": "unbounded-copy",
+      "reachable_from_input": true,
+      "base_severity": "high",
+      "severity": "high",
+      "sources": ["file"],
+      "call_path": [
+        { "va": "0x140001080", "name": "sub_140001080" },
+        { "va": "0x140002000", "name": "sub_140002000" },
+        { "va": "0x140003000", "name": "sub_140003000" }
+      ],
+      "limitation": "A call path exists from a function that reads untrusted input..."
+    }
+  ],
+  "summary": { "risky_operations": 34, "input_sources": 12, "impactful": 3 }
+}
+```
+
+### Read the methodology block before rendering severity
+
+This analysis establishes that a **call path exists** between a function that
+reads untrusted input and a function performing a risky operation. It does **not**
+perform value-level dataflow, so it does not establish that attacker-controlled
+bytes reach the affected argument, nor that intervening length checks are absent.
+
+Reachability is a *necessary* condition for exploitability, not a sufficient one.
+
+**Do not render these as confirmed vulnerabilities.** Show `severity` alongside
+`limitation`, and label the section something like "requires review" rather than
+"vulnerabilities found". A security tool that overstates its confidence is worse
+than no tool, because someone will act on it.
+
+### How severity is derived
+
+`severity` is **composed**, never asserted — from the sink kind *and* whether it
+is reachable:
+
+| `kind` | reachable | not reachable |
+|---|---|---|
+| `unbounded-copy` (`strcpy`, `strcat`) | high | low |
+| `format-string`, `remote-write`, `process-launch` | medium | low |
+| `bounded-copy`, `library-load`, `memory-protect` | low | informational |
+| `registry-write`, `file-write` | informational | informational |
+
+An unbounded copy with no reachable path is a code-quality note, not a High. That
+composition is what makes the number defensible when someone asks why.
+
+**`call_path`** is the evidence. Render it — a reachability claim without the path
+is unverifiable. Shorter paths are stronger evidence, and `impactful` findings are
+already sorted worst-first then shortest-path-first.
+
+**Unreachable findings are still included** so the inventory is complete. Filter
+on `reachable_from_input` for a summary view.
+
+## Also new on function documents
+
+**`reachable_from_input`** (bool) and **`input_sources`** (array) — whether
+untrusted data can reach this function at all. A risky operation matters far more
+when this is true, and it is a good triage signal in its own right.
+
 ## Not yet emitted
 
 Planned, not in v1.0. Additive, so they will not break existing consumers:
 
-- `xrefs` — cross-references per address
 - `loops`, `regions` — loop and if/else structure recovery
-- `strings` — referenced string literals
+- `notable_constants` — recognisable magic numbers (MD5 init, CRC polynomials)
 - `annotations` — names, comments and tags from users and the AI layer
-- `findings` — security findings and patch proposals
+- `mitigations` — NX, ASLR, /GS, CFG flags from the PE headers
+- `jump_tables` — resolved targets for indirect jumps (46 unresolved on
+  notepad.exe, 902 on kernel32.dll, all currently marked
+  `has_unresolved_exit`)
+
+`reachable_from_input`, `findings` and `strings` were on this list and are now
+emitted; `xrefs` are available per function as `callers` and `referenced_strings`,
+though not yet as a standalone per-address table.
+
+## How this reaches a browser or n8n
+
+Neither the frontend nor n8n reads these files. `backend/` runs the engine and
+serves the same documents over HTTP, one route per document — see
+`backend/README.md`. The route names mirror the file names, so `image.json` is
+`GET /api/runs/{id}/image`. The one exception is `strings`, which the API reshapes
+out of `image.json` into `{"strings": [...]}` rather than making the engine write
+the same data twice.
 
 ## Fixtures
 

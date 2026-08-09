@@ -143,17 +143,46 @@ core::Status Pipeline::analyze(const std::string& path, const PipelineOptions& o
         }
     }
 
-    // --- 6. Cross-references ---------------------------------------------
+    // --- 6. Strings -------------------------------------------------------
+    // Runs before summarisation so functions can pick up their referenced
+    // strings. Highest information-per-token input the AI layer receives.
+    if (options.extract_strings) {
+        strings_.extract(facts_, instructions_, options.strings);
+        stats_.strings_found = strings_.size();
+    }
+
+    // --- 7. Function summaries -------------------------------------------
+    // Content hashes for caching, complexity for model routing, API names and
+    // strings for prompt quality, information score for triage.
+    if (options.summarize_functions) {
+        analysis::FunctionSummarizer::Inputs summary_inputs;
+        summary_inputs.facts = &facts_;
+        summary_inputs.instructions = &instructions_;
+        summary_inputs.symbols = &symbols_;
+        summary_inputs.strings = &strings_;
+        analysis::FunctionSummarizer::summarize_all(summary_inputs, functions_);
+    }
+
+    // --- 8. Cross-references ---------------------------------------------
     if (options.build_xrefs) {
         stats_.xrefs_found = build_xrefs(instructions_, xrefs_);
     }
 
-    // --- 7. Call graph ----------------------------------------------------
+    // --- 9. Call graph ----------------------------------------------------
     if (options.build_call_graph) {
         call_graph_.build(functions_);
     }
 
-    // --- 8. Structural analysis ------------------------------------------
+    // --- 10. Reachability -------------------------------------------------
+    // Must run after the call graph: this is what separates an impactful
+    // finding from a code-quality remark, and it needs the graph to do it.
+    if (options.analyze_reachability && options.build_call_graph) {
+        reachability_.analyze(functions_, call_graph_, options.reachability);
+        stats_.risky_operations = reachability_.results().size();
+        stats_.reachable_operations = reachability_.impactful().size();
+    }
+
+    // --- 11. Structural analysis -----------------------------------------
     // Deferred: dominators, loops and region recovery are not implemented yet,
     // and nothing in the v1 output depends on them.
     if (options.run_structural_analysis) {
@@ -168,7 +197,8 @@ core::Status Pipeline::analyze(const std::string& path, const PipelineOptions& o
     summary << "analysis complete in " << stats_.analysis_seconds << "s: "
             << stats_.functions_found << " functions, "
             << stats_.disassembly.instructions_decoded << " instructions, "
-            << stats_.xrefs_found << " xrefs";
+            << stats_.xrefs_found << " xrefs, "
+            << stats_.strings_found << " strings";
     core::log_info(summary.str());
 
     return core::Status::success();

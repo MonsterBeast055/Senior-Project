@@ -57,6 +57,18 @@ struct InstructionInfo {
     // set of possible destinations.
     std::vector<core::VA> resolved_targets;
 
+    // Absolute address of a statically-known memory operand, if this
+    // instruction has one. Set for rip-relative and absolute displacements;
+    // absent when the address is computed at runtime from registers.
+    //
+    // Small field, two large payoffs:
+    //   - `lea rcx, [rip+N]` pointing into .rdata is how string references are
+    //     found, and strings are the highest-value input the AI layer can get.
+    //   - `call qword [rip+N]` reads an IAT slot, so this is what turns an
+    //     anonymous indirect call into "kernel32!CreateFileW". Without it every
+    //     Windows API call in the output is nameless.
+    std::optional<core::VA> memory_reference;
+
     // Address of the next instruction, when control can fall through.
     std::optional<core::VA> fall_through;
 

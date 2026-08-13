@@ -80,6 +80,24 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const N8N_WEBHOOK_URL = (process.env.N8N_WEBHOOK_URL || "").trim();
 
+/* The origin n8n should post results back to.
+ *
+ * Every payload we forward carries a `callback` URL, and n8n POSTs the model's
+ * answer there. When n8n runs on this machine, "localhost" resolves correctly
+ * and the default below is right. When it runs anywhere else — another laptop,
+ * a Docker container, a tunnel — "localhost" means *that* host, so results are
+ * posted into the void and the UI waits forever for a reply that was never
+ * addressed to us. Nothing errors; the panes simply never fill in.
+ *
+ * So this is set to a LAN address or public URL whenever n8n is not local.
+ * Trailing slashes are stripped because the callback paths already start with
+ * one, and `//api/...` is a different route to Express. */
+const PUBLIC_BASE_URL =
+    (process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`).trim().replace(/\/+$/, "");
+
+/** Absolute URL for a callback route. n8n is told to post to this verbatim. */
+const callbackUrl = (pathname) => `${PUBLIC_BASE_URL}${pathname}`;
+
 app.use(express.json({ limit: "8mb" }));
 
 /* Vite proxies /api during development, so same-origin covers the normal case.
@@ -145,6 +163,10 @@ app.get("/api/health", wrap(async (_request, response) => {
         engine,
         data_dir: store.DATA_DIR,
         n8n_configured: N8N_WEBHOOK_URL.length > 0,
+        // Both halves of the round trip, so a misconfigured one is visible here
+        // rather than only as results that never arrive.
+        n8n_webhook_url: N8N_WEBHOOK_URL || null,
+        public_base_url: PUBLIC_BASE_URL,
         // Stated plainly, because "why is the Decompiler pane empty" is the
         // first question anyone will ask.
         note: N8N_WEBHOOK_URL
@@ -408,6 +430,55 @@ function asLiftedFunction(result) {
     };
 }
 
+/**
+ * How much of a function the decompilation actually accounts for.
+ *
+ * The prompt asks the model to translate every basic block and to tag each line
+ * of C with the block it came from. Nothing verified that it did. That is the
+ * same unchecked assertion this project refuses everywhere else: severity is
+ * forced back to the engine's precisely so a model cannot self-report a rating,
+ * and completeness deserves the same treatment.
+ *
+ * Measured here rather than in the workflow, for two reasons. The check must not
+ * live in the thing being checked - a workflow that skips blocks would happily
+ * report full coverage. And only this side holds `func_<va>.json`, so only this
+ * side knows how many blocks the function really has; n8n knows only what it was
+ * sent, which may already have been truncated to fit a token budget.
+ *
+ * Derived from the tags in the generated code, never from a self-reported list.
+ * A model can only raise this number by actually emitting a tagged line.
+ */
+async function decompileCoverage(runId, va, body) {
+    const detail = await store.readJson(
+        path.join(store.paths(runId).functions, `func_${va.slice(2)}.json`),
+    );
+    const blocks = (detail?.blocks ?? []).map((b) => b.start).filter(Boolean);
+    if (blocks.length === 0) return null;
+
+    const tagged = new Set();
+    for (const entry of body?.line_mapping ?? []) {
+        if (entry && entry.block) tagged.add(String(entry.block));
+    }
+
+    const real = new Set(blocks);
+    const missing = blocks.filter((block) => !tagged.has(block));
+    const covered = blocks.length - missing.length;
+
+    return {
+        blocks_total: blocks.length,
+        blocks_covered: covered,
+        fraction: Number((covered / blocks.length).toFixed(3)),
+        /* Blocks with no line of C attributed to them. A shortfall can mean the
+         * model skipped them or that they were truncated out of the prompt
+         * before it ever saw them - not distinguishable from here, and the
+         * distinction does not change the fact that they are unaccounted for. */
+        missing,
+        /* Tags naming a block this function does not contain. Should be empty;
+         * a non-empty list means the mapping cannot be trusted. */
+        unknown: [...tagged].filter((block) => !real.has(block)),
+    };
+}
+
 app.get("/api/runs/:id/functions/:va/lifted", wrap(async (request, response) => {
     const va = normaliseVa(request.params.va);
     if (!va) return response.status(400).json({ error: "va must be hex" });
@@ -433,8 +504,14 @@ app.post("/api/runs/:id/functions/:va/lift", wrap(async (request, response) => {
     // Validates the function exists and produces the same payload the automated
     // pass uses - including callee summaries.
     await buildAiPayload(runId, "decompile", va);
-    await aijobs.startBatch(runId, "decompile", { only: [va] }, dispatchAi);
-    response.json({ state: "queued" });
+    // force: asking for this one function by name means redo it. Without this
+    // the batch skip applies and Re-lift silently does nothing.
+    const job = await aijobs.startBatch(
+        runId, "decompile", { only: [va], force: true }, dispatchAi);
+    // Report the job's real state. Answering "queued" unconditionally is what
+    // hid the bug: the pane polled for two minutes against a request that was
+    // never sent.
+    response.json({ state: job.pending.length > 0 ? "queued" : job.state });
 }));
 
 /** n8n posts a finished lift here.
@@ -445,10 +522,12 @@ app.post("/api/runs/:id/functions/:va/lifted", wrap(async (request, response) =>
     const va = normaliseVa(request.params.va);
     if (!va) return response.status(400).json({ error: "va must be hex" });
     const runId = request.params.id;
+    const body = { ...(request.body || {}) };
+    body.coverage = await decompileCoverage(runId, va, body);
     // Origin "manual": this callback belongs to `Lift with AI`, which a user
     // pressed deliberately. It becomes current and pushes the automated version
     // into history rather than erasing it.
-    await aijobs.recordResult(runId, "decompile", va, request.body || {}, dispatchAi, "manual");
+    await aijobs.recordResult(runId, "decompile", va, body, dispatchAi, "manual");
     // Keep the Reports table's Lifted column truthful.
     await store.patchMeta(runId, await store.summarise(runId));
     response.json({ ok: true });
@@ -511,7 +590,7 @@ app.post("/api/runs/:id/findings/:va/:api/explain", wrap(async (request, respons
         run_id: runId,
         va,
         api,
-        callback: `/api/runs/${runId}/findings/${va}/${encodeURIComponent(api)}/explanation`,
+        callback: callbackUrl(`/api/runs/${runId}/findings/${va}/${encodeURIComponent(api)}/explanation`),
         context: await store.readJson(p.context),
         image: await store.readJson(path.join(p.analysis, "image.json")),
         finding: finding ?? null,
@@ -651,7 +730,7 @@ async function buildAiPayload(runId, task, va) {
         task,
         run_id: runId,
         va,
-        callback: `/api/runs/${runId}/ai/${task}/${va}/result`,
+        callback: callbackUrl(`/api/runs/${runId}/ai/${task}/${va}/result`),
         context: await store.readJson(p.context),
         // Image-level facts worth having: architecture, what it imports, whether a
         // section looks packed. Trimmed of the bulky indexes.
@@ -916,8 +995,17 @@ app.get("/api/runs/:id/ai/behaviour-profile", wrap(async (request, response) => 
                 strings: (detail.referenced_strings ?? []).filter(
                     (s) => capability.strings.some((n) => s.toLowerCase().includes(n))),
                 // Filled in by the AI pass, per function, when it has run.
-                explanation: (await aijobs.getResult(runId, "behaviour", detail.va))
-                    ?.summary ?? null,
+                //
+                // A failed call still stores a result — the queue cannot settle
+                // without one — and its summary field holds the failure text.
+                // Rendering that here put "The model call did not succeed" into
+                // the evidence column beside a real imported API, where it reads
+                // as something the analysis found. Absent is the honest value.
+                explanation: await (async () => {
+                    const stored = await aijobs.getResult(runId, "behaviour", detail.va);
+                    if (!stored || stored.parse_error === true) return null;
+                    return stored.summary ?? null;
+                })(),
             });
         }
     }
@@ -954,10 +1042,131 @@ app.get("/api/runs/:id/ai/behaviour-profile", wrap(async (request, response) => 
     });
 }));
 
+/* --- literal AI routes -------------------------------------------------
+ * These must be registered before any `/ai/:task` route. Express matches in
+ * order, so a wildcard declared first claims `/ai/coverage` and reports
+ * `unknown AI task "coverage"` - an error naming a route nobody requested.
+ * Keep literal paths above the wildcards.
+ * --------------------------------------------------------------------- */
+
+/** Which functions already have AI results, per task. Drives the symbol tree's
+ *  analysed/not-analysed marking. */
+app.get("/api/runs/:id/ai/coverage", wrap(async (request, response) => {
+    response.json(await aijobs.analysedFunctions(request.params.id));
+}));
+
+/**
+ * What a hand-picked selection would come to, without starting it.
+ *
+ * Depth expansion is exponential, so the count has to be knowable before the
+ * user commits rather than discovered from a progress bar that will not finish
+ * for an hour. Body: {only: [va], depth: 0-7, findings: [{function, api}]}.
+ */
+app.post("/api/runs/:id/ai/preview", wrap(async (request, response) => {
+    const runId = request.params.id;
+    const body = request.body || {};
+
+    const roots = Array.isArray(body.only) ? body.only.map(normaliseVa).filter(Boolean) : [];
+    const fromFindings = Array.isArray(body.findings) && body.findings.length > 0
+        ? await aijobs.selectionForFindings(runId, body.findings)
+        : [];
+
+    const expansion = await aijobs.expandSelection(
+        runId, [...new Set([...roots, ...fromFindings])], body.depth ?? 0);
+
+    // Names and scores, so the confirmation lists functions rather than addresses.
+    const document = await store.readJson(
+        path.join(store.paths(runId).analysis, "functions.json"));
+    const index = new Map((document?.functions ?? []).map((f) => [f.va, f]));
+
+    response.json({
+        ...expansion,
+        from_findings: fromFindings.length,
+        functions: expansion.selected.map((va) => ({
+            va,
+            name: index.get(va)?.name ?? va,
+            information_score: index.get(va)?.information_score ?? 0,
+        })),
+    });
+}));
+
 app.get("/api/runs/:id/ai/:task", wrap(async (request, response) => {
     if (!checkTask(request.params.task, response)) return;
-    const job = await aijobs.getJob(request.params.id, request.params.task);
+    // Reclaim any dispatch that never came back before reporting progress. The
+    // UI polls this while a run is in flight, so recovery rides on the polling
+    // that is already happening rather than needing a timer on the server.
+    const job = await aijobs.reapStalled(
+        request.params.id, request.params.task, dispatchAi);
     response.json({ ...job, n8n_configured: N8N_WEBHOOK_URL.length > 0 });
+}));
+
+/**
+ * The exact context that would be sent to the model, without sending it.
+ *
+ * Everything else in this project can be traced to its evidence; the prompt was
+ * the one place a reader had to take it on faith. This closes that: the same
+ * builder the dispatcher uses, so what is shown is what would be sent, not a
+ * description of it.
+ *
+ * Deliberately does not require n8n. Being able to inspect what *would* go out
+ * is most useful precisely when the AI layer is not configured, and it makes the
+ * design inspectable by someone who never runs a model at all.
+ */
+app.get("/api/runs/:id/ai/:task/:va/payload", wrap(async (request, response) => {
+    const { id, task } = request.params;
+    if (!checkTask(task, response)) return;
+    const va = normaliseVa(request.params.va);
+    if (!va) return response.status(400).json({ error: "va must be hex" });
+
+    const payload = await buildAiPayload(id, task, va);
+
+    /* A few counts the raw document does not make obvious. Reading "3 of 7
+     * callees have summaries" tells you more about the quality of this prompt
+     * than scrolling the JSON does. */
+    const callees = payload.callees ?? [];
+    response.json({
+        ...payload,
+        // Not sent to the model; this is for the reader.
+        _summary: {
+            blocks: payload.function?.blocks?.length ?? 0,
+            instructions: payload.function?.instruction_count ?? 0,
+            api_calls: payload.function?.api_calls?.length ?? 0,
+            referenced_strings: payload.function?.referenced_strings?.length ?? 0,
+            callees: callees.length,
+            callees_with_summary: callees.filter((c) => c.summary).length,
+            engine_findings: (payload.engine_findings ?? []).length,
+            call_path_steps: (payload.call_path_context ?? []).length,
+            has_user_context: Boolean(payload.context),
+        },
+    });
+}));
+
+
+
+/** Stop one task's batch. Already-dispatched work still records if it returns. */
+app.post("/api/runs/:id/ai/:task/stop", wrap(async (request, response) => {
+    if (!checkTask(request.params.task, response)) return;
+    const job = await aijobs.stopBatch(request.params.id, request.params.task);
+    response.json(job);
+}));
+
+/** Delete every AI result for this run and start from nothing.
+ *
+ *  All three tasks together: the automated pass is one operation from the
+ *  user's point of view, and resetting only the stage they happen to be looking
+ *  at would leave the other two holding results from a run that no longer
+ *  exists. */
+app.post("/api/runs/:id/ai/reset", wrap(async (request, response) => {
+    const cleared = [];
+    for (const task of aijobs.TASKS) {
+        await aijobs.stopBatch(request.params.id, task);
+        await aijobs.resetTask(request.params.id, task);
+        cleared.push(task);
+    }
+    // The Reports table counts lifted functions; leaving it stale would show a
+    // count for results that have just been deleted.
+    await store.patchMeta(request.params.id, await store.summarise(request.params.id));
+    response.json({ ok: true, cleared });
 }));
 
 app.post("/api/runs/:id/ai/:task", wrap(async (request, response) => {
@@ -1014,8 +1223,11 @@ app.post("/api/runs/:id/ai/:task/:va", wrap(async (request, response) => {
     if (!N8N_WEBHOOK_URL) return n8nMissing(response);
     // Validates that the function exists before claiming the work was queued.
     await buildAiPayload(id, task, va);
-    await aijobs.startBatch(id, task, { only: [va] }, dispatchAi);
-    response.json({ state: "queued" });
+    // Same as the lift route: one named function means redo it, and report the
+    // state the job actually reached.
+    const job = await aijobs.startBatch(
+        id, task, { only: [va], force: true }, dispatchAi);
+    response.json({ state: job.pending.length > 0 ? "queued" : job.state });
 }));
 
 /** n8n delivers one result here. */
@@ -1032,6 +1244,9 @@ app.post("/api/runs/:id/ai/:task/:va/result", wrap(async (request, response) => 
     if (task === "bugs") {
         body.derived_from = await aijobs.currentVersionId(id, va);
     }
+    if (task === "decompile") {
+        body.coverage = await decompileCoverage(id, va, body);
+    }
 
     const job = await aijobs.recordResult(id, task, va, body, dispatchAi);
     // Refresh the run summary so the Reports table's Lifted column keeps up. The
@@ -1040,6 +1255,88 @@ app.post("/api/runs/:id/ai/:task/:va/result", wrap(async (request, response) => 
     // finished run still showed "0 lifted".
     await store.patchMeta(id, await store.summarise(id));
     response.json({ ok: true, done: job.done, total: job.total });
+}));
+
+/* ======================================================================
+ * Mitigations
+ *
+ * The engine half of this was reachable only from the command line, which in a
+ * browser-based tool means it did not exist as far as anyone using it was
+ * concerned. These three routes put it in the application.
+ *
+ * Note what is NOT here: nothing repairs the defective code. The engine has no
+ * value-level dataflow, so it cannot know the size of a destination buffer, and
+ * a rewrite that guesses one is unverifiable. Raising the loader mitigations is
+ * a smaller claim that can be checked - by us, and independently by BinSkim.
+ * ====================================================================== */
+
+/** Where a hardened copy of a run's binary is written. */
+const hardenedPath = (runId) => path.join(store.paths(runId).root, "hardened.exe");
+
+/** Read-only: the mitigation state of the uploaded binary. */
+app.get("/api/runs/:id/mitigations", wrap(async (request, response) => {
+    const p = store.paths(request.params.id);
+    if (!(await store.readJson(p.meta))) {
+        return response.status(404).json({ error: "no such run" });
+    }
+
+    const result = await runner.runJsonCommand(["mitigations", p.input]);
+    if (!result.ok) return response.status(503).json({ error: result.error });
+
+    /* The CLI wraps the report: {schema_version, mitigations: {...}}. Flatten it
+     * here so the frontend sees one shape whichever route it came from - `harden`
+     * emits its before/after reports unwrapped, and two shapes for the same thing
+     * is how a pane ends up rendering nothing at all. */
+    const report = result.document?.mitigations ?? result.document ?? {};
+
+    // Report whether a hardened copy already exists, so the UI can offer the
+    // download without a second request.
+    let hardened = null;
+    try {
+        const stats = await fsp.stat(hardenedPath(request.params.id));
+        hardened = { available: true, size: stats.size, produced_at: stats.mtime.toISOString() };
+    } catch {
+        hardened = { available: false };
+    }
+
+    response.json({ ...report, hardened });
+}));
+
+/** Produce a hardened copy. Never touches the uploaded original. */
+app.post("/api/runs/:id/harden", wrap(async (request, response) => {
+    const runId = request.params.id;
+    const p = store.paths(runId);
+    if (!(await store.readJson(p.meta))) {
+        return response.status(404).json({ error: "no such run" });
+    }
+
+    const args = ["harden", p.input, "--out", hardenedPath(runId)];
+    // Editing a signed image invalidates its signature, so the engine refuses
+    // unless told otherwise. The decision belongs to the person, not to us.
+    if (request.body?.allow_signed === true) args.push("--allow-signed");
+    // The one change that can break the program, so it is never implied.
+    if (request.body?.fix_wx === true) args.push("--fix-wx");
+
+    const result = await runner.runJsonCommand(args);
+    if (!result.ok) return response.status(503).json({ error: result.error });
+
+    // A refusal is a result, not a failure: "this image has no relocation data,
+    // so ASLR cannot be enabled" is the useful answer and arrives as 200.
+    response.json(result.document);
+}));
+
+/** Download the hardened copy. */
+app.get("/api/runs/:id/hardened", wrap(async (request, response) => {
+    const runId = request.params.id;
+    const file = hardenedPath(runId);
+    try {
+        await fsp.access(file);
+    } catch {
+        return response.status(404).json({ error: "no hardened build for this run" });
+    }
+    const meta = await store.readJson(store.paths(runId).meta);
+    const base = (meta?.file_name || "binary").replace(/\.[^.]*$/, "");
+    response.download(file, `${base}.hardened.exe`);
 }));
 
 /* --- errors ----------------------------------------------------------- */
@@ -1064,4 +1361,18 @@ app.listen(PORT, async () => {
         console.log("backend/.env points at the compiled sp.exe.");
     }
     console.log(`n8n       ${N8N_WEBHOOK_URL || "not configured (AI panes will show 'not-run')"}`);
+    console.log(`callback  ${PUBLIC_BASE_URL}  (n8n posts results here)`);
+
+    /* A remote n8n told to reply to "localhost" replies to itself. That failure
+     * is silent — the forward succeeds, the model runs, and the result is
+     * delivered to the wrong machine — so it is worth naming at startup rather
+     * than leaving someone to discover it by watching a pane stay empty. */
+    const remoteN8n = N8N_WEBHOOK_URL && !/^https?:\/\/(localhost|127\.0\.0\.1)\b/i.test(N8N_WEBHOOK_URL);
+    const localCallback = /^https?:\/\/(localhost|127\.0\.0\.1)\b/i.test(PUBLIC_BASE_URL);
+    if (remoteN8n && localCallback) {
+        console.log("");
+        console.log("WARNING: n8n is remote but the callback URL is localhost, which for");
+        console.log("n8n means its own machine. Results will never arrive. Set");
+        console.log("PUBLIC_BASE_URL in backend/.env to this machine's LAN address.");
+    }
 });

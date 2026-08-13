@@ -42,6 +42,36 @@ interface TreeNode {
     fn?: FunctionSummary;
 }
 
+/* How far a function has been taken.
+ *
+ * The engine analyses everything it discovers, so "not analysed by the engine"
+ * would be an almost empty category and a useless colour. What is worth
+ * distinguishing is where the engine's own result is unreliable — an unresolved
+ * jump table leaves the control-flow graph incomplete at a known point — and
+ * whether a model has been over it. */
+export type AnalysisState = "ai" | "engine" | "limited";
+
+const STATE_MARK: Record<AnalysisState, { glyph: string; cls: string; title: string }> = {
+    ai: {
+        glyph: "●",
+        cls: "mk-ai",
+        title: "Decompiled by the AI layer",
+    },
+    engine: {
+        glyph: "●",
+        cls: "mk-engine",
+        title: "Analysed by the engine. No AI result yet.",
+    },
+    limited: {
+        glyph: "●",
+        cls: "mk-limited",
+        title:
+            "The engine's own analysis is incomplete here — an unresolved jump "
+            + "target, or a thunk or library function that is deliberately never "
+            + "sent to the model.",
+    },
+};
+
 const ICONS: Record<NodeKind, { glyph: string; cls: string }> = {
     folder:   { glyph: "■", cls: "" },
     function: { glyph: "ƒ", cls: "fn" },
@@ -282,20 +312,35 @@ function flatten(
     return out;
 }
 
+/** Which mark a function gets. `analysed` holds the addresses with an AI result. */
+function stateOf(fn: FunctionSummary, analysed: Set<string>): AnalysisState {
+    if (analysed.has(fn.va)) return "ai";
+    // Never going to be sent to a model, so "waiting for AI" would be a lie.
+    if (fn.is_thunk || fn.is_imported_stub || fn.is_library_code) return "limited";
+    // Nothing to show for itself: no blocks recovered at all.
+    if ((fn.block_count ?? 0) === 0) return "limited";
+    return "engine";
+}
+
 interface Props {
     functions: FunctionSummary[];
     image: ImageInfo | null;
     strings: ExtractedString[];
     currentVa: string | null;
     filter: string;
+    /** Addresses that have a decompile result. Drives the green marks. */
+    analysed?: Set<string>;
     onOpenFunction: (va: string) => void;
     /** Imports, strings and sections do not navigate to an address — they ask
      *  "who uses this". The shell opens a window for the answer. */
     onOpenXref?: (subject: XrefSubject) => void;
 }
 
+const NO_ANALYSIS: Set<string> = new Set();
+
 export default function SymbolTree({
-    functions, image, strings, currentVa, filter, onOpenFunction, onOpenXref,
+    functions, image, strings, currentVa, filter, analysed = NO_ANALYSIS,
+    onOpenFunction, onOpenXref,
 }: Props) {
     const [open, setOpen] = useState<Set<string>>(
         // Functions open by default: that is what a person came to look at.
@@ -387,6 +432,17 @@ export default function SymbolTree({
                         <span className={`ttoggle${expandable ? "" : " empty"}`}>
                             {expandable ? (expanded ? "−" : "+") : ""}
                         </span>
+
+                        {/* Only on functions: an import or a string has nothing
+                            to be analysed. */}
+                        {node.kind === "function" && node.fn && (() => {
+                            const mark = STATE_MARK[stateOf(node.fn, analysed)];
+                            return (
+                                <span className={`tmark ${mark.cls}`} title={mark.title}>
+                                    {mark.glyph}
+                                </span>
+                            );
+                        })()}
 
                         <span className={`ticon ${icon.cls}`}>{icon.glyph}</span>
 

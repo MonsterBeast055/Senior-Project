@@ -21,6 +21,7 @@ add_executable(sp_tests
     "test_call_graph.cpp"
     "test_strings.cpp"
     "test_reachability.cpp"
+    "test_pe_hardener.cpp"
 )
 
 target_link_libraries(sp_tests PRIVATE sp_engine)

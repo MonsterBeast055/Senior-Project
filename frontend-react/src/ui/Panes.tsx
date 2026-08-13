@@ -10,11 +10,15 @@ import type { XrefSubject } from "./XrefWindow";
 /* --- Disassembly -------------------------------------------------------- */
 
 export function Disassembly({
-    detail, selectedBlock, onSelectBlock,
+    detail, selectedBlock, onSelectBlock, onHoverCall, onPinCall,
 }: {
     detail: FunctionDetail;
     selectedBlock: string | null;
     onSelectBlock: (va: string) => void;
+    /** Hover a call target. `va` is null when the pointer leaves it. */
+    onHoverCall?: (va: string | null, element: HTMLElement | null) => void;
+    /** Click a call target: same card, pinned, with actions. */
+    onPinCall?: (va: string, element: HTMLElement) => void;
 }) {
     return (
         <div className="code">
@@ -41,10 +45,28 @@ export function Disassembly({
                             <span className="asm-mnem">{insn.mnemonic.padEnd(8)}</span>
                             <span className="asm-ops">{insn.operands}</span>
                             {/* The resolved name is what turns
-                                `call qword [rip+0x1f0ce]` into CreateFileW. */}
-                            {insn.target_name && (
+                                `call qword [rip+0x1f0ce]` into CreateFileW.
+                                For a call into the image it is also the handle
+                                for the summary card — an import has no function
+                                of ours behind it, so it stays inert text. */}
+                            {insn.flow === "call" && insn.target ? (
+                                <span
+                                    className="asm-api asm-callto"
+                                    onMouseEnter={(event) =>
+                                        onHoverCall?.(insn.target!, event.currentTarget)}
+                                    onMouseLeave={() => onHoverCall?.(null, null)}
+                                    onClick={(event) => {
+                                        // The row's own handler selects the block;
+                                        // clicking the target means the target.
+                                        event.stopPropagation();
+                                        onPinCall?.(insn.target!, event.currentTarget);
+                                    }}
+                                >
+                                    {"  ; " + (insn.target_name ?? insn.target)}
+                                </span>
+                            ) : insn.target_name ? (
                                 <span className="asm-api">{"  ; " + insn.target_name}</span>
-                            )}
+                            ) : null}
                         </div>
                     ))}
                 </div>

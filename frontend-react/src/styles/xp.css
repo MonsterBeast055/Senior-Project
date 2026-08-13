@@ -592,6 +592,9 @@ table.grid tbody tr.selected .dim { color: #D8E4F8; }
     background: #ECE9D8;
 }
 .page-inner { max-width: 940px; margin: 0 auto; }
+/* A page kept mounted while another tab shows, so its timers and in-flight
+   state survive the switch. Two classes beat one, so this wins over .page. */
+.page.hidden { display: none; }
 
 .page h1 { font-size: 15px; margin: 0 0 3px 0; }
 .page h2 { font-size: 12px; margin: 18px 0 6px 0; }
@@ -1278,6 +1281,240 @@ body.dragging-window, body.dragging-window * {
     padding: 3px;
     background: #ECE9D8;
 }
+/* Hidden, not unmounted. An automated run is driven by this page's own poll —
+   it is what starts each stage when the previous one settles — so unmounting on
+   a tab switch does not merely lose the progress display, it stops the run.
+   Going to Reports mid-run left decompilation finished and bug hunting never
+   started. Keeping the subtree mounted and invisible keeps the driver alive. */
+.aipage.hidden { display: none; }
+
+/* Host for a view that stays mounted while another tab is showing.
+   #app is a flex column and each view's panels were direct children of it, so
+   the host has to be a flex column itself and claim the same growth, or the
+   panes lose their height the moment they are wrapped. */
+.viewhost {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.viewhost.hidden { display: none; }
+
+/* Analysis state, per function, in the symbol tree.
+   Colour alone would fail for a colour-blind reader and in a printed report, so
+   each mark also carries a tooltip saying what it means, and the legend spells
+   the three out in words. */
+.tmark {
+    display: inline-block;
+    width: 9px;
+    margin-right: 2px;
+    font-size: 9px;
+    line-height: 1;
+    cursor: help;
+}
+.tmark.mk-ai      { color: #178040; }   /* AI has decompiled it */
+.tmark.mk-engine  { color: #C08A1E; }   /* engine only */
+.tmark.mk-limited { color: #A32D2D; }   /* engine result incomplete, or excluded */
+
+/* Hand-picked run: functions on the left, findings on the right. */
+.choicegrid {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+}
+.choicegrid > div { flex: 1; min-width: 0; }
+.choicelist {
+    border: 1px solid #7F9DB9;
+    background: #FFFFFF;
+    max-height: 260px;
+    overflow: auto;
+}
+.choicerow {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.choicerow:hover { background: #E8F0FE; }
+.choicerow .tlabel { overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 860px) {
+    .choicegrid { flex-direction: column; }
+}
+
+.tree-legend {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 2px 4px;
+    border-top: 1px solid #D4D0C8;
+    font-size: 11px;
+    color: #555;
+}
+
+/* AI defect reports in the main pane. They were readable only in the 260px
+   sidebar, where every title truncated after four words — the principal output
+   of the run, in the least legible place on screen. */
+.aifinding {
+    border: 1px solid #C8CEDA;
+    background: #FFFFFF;
+    padding: 5px 7px;
+    margin-bottom: 6px;
+}
+.aifinding .aif-head {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+    margin-bottom: 3px;
+}
+.aifinding .aif-body {
+    line-height: 1.5;
+    margin-bottom: 4px;
+}
+.aifinding .aif-foot {
+    border-top: 1px solid #EAEAEA;
+    padding-top: 3px;
+    font-size: 11px;
+}
+
+/* --- Breadcrumb ------------------------------------------------------------
+   The trail of functions you clicked through. Sits directly under the view tabs
+   so it reads as part of the chrome rather than as content. */
+.crumbs {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    overflow: hidden;
+    gap: 3px;
+    padding: 3px 5px;
+    background: #ECE9D8;
+    border-bottom: 1px solid #ACA899;
+    font-size: 11px;
+}
+.crumbs .crumbnav {
+    min-width: 22px;
+    padding: 0 4px;
+    line-height: 16px;
+}
+.crumbsep { color: #808080; padding: 0 1px; }
+.crumb {
+    padding: 1px 4px;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.crumb:hover { border-color: #7F9DB9; background: #FFFFFF; }
+.crumb.current {
+    font-weight: bold;
+    cursor: default;
+    border-color: transparent;
+    background: transparent;
+}
+.crumb.dim { cursor: default; color: #808080; }
+.crumb.dim:hover { border-color: transparent; background: transparent; }
+
+/* The pinned root's path. Tinted apart from the breadcrumb above it because the
+   two look alike and mean different things: one is where you have been, the
+   other is what the program does to get here. */
+.rootpath {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    overflow: hidden;
+    gap: 3px;
+    padding: 3px 5px;
+    background: #FFF8DC;
+    border-bottom: 1px solid #ACA899;
+    font-size: 11px;
+}
+.rootpath .rp-label {
+    color: #7A6A28;
+    font-weight: bold;
+    padding-right: 3px;
+    white-space: nowrap;
+}
+
+/* --- Call summary card -----------------------------------------------------
+   Hover shows it, click pins it. A button inside a hover-dismissed surface is
+   unreachable — the pointer leaves the trigger on the way to the button — so
+   the actions only appear once the card is pinned and stops following the
+   mouse. */
+.asm-callto { cursor: pointer; }
+.asm-callto:hover { text-decoration: underline; }
+
+.callcard {
+    background: #FFFFE1;
+    border: 1px solid #B8B48F;
+    box-shadow: 2px 2px 4px rgba(0, 0, 0, 0.25);
+    padding: 5px 6px;
+    font-size: 11px;
+    line-height: 1.45;
+}
+.callcard.pinned {
+    background: #FFFFFF;
+    border-color: #7F9DB9;
+}
+.callcard .cc-head {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin-bottom: 3px;
+}
+.callcard .cc-head b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.callcard .cc-x { cursor: pointer; padding: 0 3px; color: #555; }
+.callcard .cc-x:hover { color: #A32D2D; }
+.callcard .cc-body { margin-bottom: 4px; }
+.callcard .cc-facts {
+    border-top: 1px solid #D4D0C8;
+    padding-top: 3px;
+    color: #555;
+}
+.callcard .cc-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 5px;
+    border-top: 1px solid #D4D0C8;
+    padding-top: 5px;
+}
+.callcard .cc-hint { margin-top: 3px; font-size: 11px; }
+
+/* --- Inline callee expansion -----------------------------------------------
+   An expanded body is visibly a quotation, not part of the function you are
+   reading: indented, on its own ground, with a bar naming what it is. Without
+   that separation the two functions read as one, which is worse than not
+   expanding at all. */
+.cexpand {
+    cursor: pointer;
+    padding: 0 3px;
+    margin-left: 4px;
+    color: #0A3D91;
+    user-select: none;
+}
+.cexpand:hover { background: #DCE9FB; }
+.cexpand.dim { cursor: help; color: #808080; }
+.cexpand.dim:hover { background: transparent; }
+
+.cnest {
+    border-left: 2px solid #7F9DB9;
+    background: #F7F7F0;
+    margin-top: 1px;
+    margin-bottom: 1px;
+}
+.cnest .cnest-bar {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    background: #E4E9F0;
+    border-bottom: 1px solid #C8CEDA;
+    padding: 1px 4px;
+}
+/* Nested rows are quotations: they carry no block selection of their own, so
+   they must not offer the pointer that says otherwise. */
+.cnest .row { cursor: default; }
+.cnest .row:hover { background: transparent; }
 .aitree {
     flex: 0 0 260px;
     min-width: 200px;

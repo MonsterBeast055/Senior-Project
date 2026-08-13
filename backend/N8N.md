@@ -18,21 +18,67 @@ sees the binary or the filesystem.
                                      │
                  ┌───────────────────▼──────────────────┐
                  │ HTTP Request                          │
-                 │ POST http://localhost:3000{{callback}}│
+                 │ POST {{ $json.callback }}             │
                  └───────────────────────────────────────┘
 ```
 
-The request carries a `callback` field. **Post the result to that URL** — do not
-construct one. It already encodes the run, the task and the address, so a result
-cannot be filed against the wrong function.
+The request carries a `callback` field, and it is a **complete absolute URL**.
+**Post the result to it verbatim** — do not prefix it, do not rebuild it. It
+already encodes the backend's address, the run, the task and the function, so a
+result cannot be filed against the wrong function or sent to the wrong machine.
+
+> Earlier drafts of this document showed `http://localhost:3000{{callback}}`,
+> because `callback` used to be a bare path. It is now absolute. If your workflow
+> still prefixes an origin, it will produce a URL like
+> `http://localhost:3000http://192.168.1.75:3000/api/...` and nothing will arrive.
+
+## Shortcut — import the ready-made workflow
+
+`docs/n8n-workflow.json` is a working implementation of everything below. In n8n:
+**Workflows → ⋯ → Import from file**, pick that file, set the API key in the
+**Prepare** node, activate it.
+
+Five nodes: Webhook → Prepare → Call model → Shape result → Send to backend. It
+handles all four tasks in one path rather than branching, because every task
+needs the same shape — build a prompt, call a model, post the answer back — and
+only the prompt differs. A Switch node with four near-identical branches is four
+places to fix the same bug.
+
+Read the rest of this document anyway. Knowing why the contract is what it is
+matters when the workflow needs changing.
+
+## Step 0 — the two addresses
+
+n8n and the backend run on different machines, so each has to be told where the
+other is. Both directions must work; getting one right and the other wrong looks
+identical to "the AI layer is broken".
+
+| direction | setting | lives where |
+| --- | --- | --- |
+| backend → n8n | `N8N_WEBHOOK_URL` | `backend/.env` |
+| n8n → backend | `PUBLIC_BASE_URL` | `backend/.env` |
+
+`PUBLIC_BASE_URL` is what the backend stamps into every `callback`, so the
+workflow needs no configuration for the return trip at all — it just posts where
+it is told.
+
+**In Docker, `localhost` is the container.** Not the host, and certainly not the
+backend's machine. This is the single most common way this setup fails. The
+backend now warns at startup if it spots the mistake on its side.
 
 ## Step 1 — point the backend at your webhook
 
 In `backend/.env`:
 
 ```
-N8N_WEBHOOK_URL=http://localhost:5678/webhook/analyse
+N8N_WEBHOOK_URL=http://192.168.1.103:5678/webhook/analyze
+PUBLIC_BASE_URL=http://192.168.1.75:3000
 ```
+
+The webhook path is whatever n8n generated on your Webhook node. `analyze` is
+what it is today; if you rename or recreate the node, tell the backend owner so
+`.env` can follow — a stale path here fails as a connection refused, not as a
+missing route.
 
 Restart the API. Check it took:
 
@@ -40,9 +86,18 @@ Restart the API. Check it took:
 curl http://localhost:3000/api/health
 ```
 
-`"n8n_configured": true` means requests will be forwarded. While it is `false`,
-every AI endpoint answers `{"state":"not-run"}` instead of failing — the UI stays
-usable, it just says the AI layer is not connected.
+`"n8n_configured": true` means requests will be forwarded, and `public_base_url`
+in the same response is the origin your callbacks will carry — confirm it is a
+LAN address and not `localhost`. While `n8n_configured` is `false`, every AI
+endpoint answers `{"state":"not-run"}` instead of failing — the UI stays usable,
+it just says the AI layer is not connected.
+
+Both machines also need the relevant port open. On Windows, inbound is blocked by
+default; run as Administrator on the backend machine:
+
+```
+netsh advfirewall firewall add rule name="Senior-Project API" dir=in action=allow protocol=TCP localport=3000
+```
 
 ## Step 2 — one webhook, three tasks
 
@@ -66,7 +121,7 @@ with the webhook pointed at a listener:
   "task": "decompile",
   "run_id": "20260808065600-af9a70d5",
   "va": "0x1400023a0",
-  "callback": "/api/runs/20260808065600-af9a70d5/ai/decompile/0x1400023a0/result",
+  "callback": "http://192.168.1.75:3000/api/runs/20260808065600-af9a70d5/ai/decompile/0x1400023a0/result",
 
   "context": null,               // what the human said about the binary, if anything
   "image": { "arch": "x86_64", "image_base": "0x140000000",
@@ -130,7 +185,7 @@ produce them. The backend enforces this: it overwrites `severity_source` to
 
 ## Step 4 — what to post back
 
-To `{{ $json.callback }}`, prefixed with the backend's origin.
+To `{{ $json.callback }}`, exactly as received.
 
 **decompile**
 
@@ -174,22 +229,38 @@ row **unconfirmed** so a reader knows it is a lead rather than a result.
 
 ## Step 5 — check it end to end
 
-You do not need a model to test the plumbing. Curl the callback directly:
+You do not need a model to test the plumbing. Curl the callback directly —
+**from the n8n machine**, not the backend's. Running it locally proves nothing
+about the network path, which is the part most likely to be wrong.
 
 ```bash
 RUN=<run id from the Reports tab>
 curl -X POST -H 'Content-Type: application/json' \
   -d '{"model":"manual-test","code":"int f(){return 0;}","summary":"Test."}' \
-  http://localhost:3000/api/runs/$RUN/ai/decompile/0x1400023a0/result
+  http://192.168.1.75:3000/api/runs/$RUN/ai/decompile/0x1400023a0/result
 ```
+
+If n8n is in Docker, run it inside the container (`docker exec -it <name> sh`),
+since that is the network context the real request will come from.
 
 Open that function on the Analysis tab — the Decompiler pane shows it immediately.
 If that works, the only variable left is the model call.
 
 ## Things that will bite you
 
-**Post to `callback`, not a URL you build.** The address in the path is how a
-result is filed. Get it wrong and the result lands on another function.
+**Post to `callback` verbatim, not a URL you build.** It is absolute and already
+carries the backend's origin. Prefixing it produces a doubled URL; rebuilding it
+by hand risks filing the result against another function.
+
+**`localhost` in Docker is the container.** Both for reaching the backend and for
+anything else outside n8n. Use the LAN address.
+
+**`/webhook/` needs the workflow activated; `/webhook-test/` does not.** n8n shows
+two URLs on the Webhook node and they behave differently. The test URL is live
+only while you have "Listen for test event" open, and it takes exactly one
+request. The production URL — the one in `.env` — returns **404 until the
+workflow's Active toggle is on**, and stays 404 every time it is switched off.
+Most of the "the backend can't reach n8n" reports are this.
 
 **Return valid JSON.** The backend stores the body as-is. An n8n node that returns
 the model's raw text with markdown fences around it will store the fences.

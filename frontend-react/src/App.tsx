@@ -8,7 +8,7 @@
  * The menu bar and the global search live here rather than in the workspace,
  * because both act on the whole run rather than on one pane.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     configure, currentMode, currentRun, getFindings, getFunction, getFunctions,
     getHealth, getImage, getStrings, setRun, type DataMode,
@@ -21,6 +21,9 @@ import { StatusBar, TitleBar } from "./ui/Chrome";
 import AnalysisView from "./ui/AnalysisView";
 import AiAnalysisView from "./ui/AiAnalysisView";
 import BackendStatus from "./ui/BackendStatus";
+import Breadcrumb from "./ui/Breadcrumb";
+import RootPath from "./ui/RootPath";
+import SecurityView from "./ui/SecurityView";
 import ContextPrompt from "./ui/ContextPrompt";
 import FindingWindow from "./ui/FindingWindow";
 import FloatingWindow from "./ui/FloatingWindow";
@@ -32,12 +35,13 @@ import "./styles/xp.css";
 /* Order here is the order of the tabs. AI Analysis sits between Analysis and
    Reports: you analyse a binary, then ask the model about it, then look back at
    what you have accumulated. */
-type View = "upload" | "analysis" | "ai" | "reports";
+type View = "upload" | "analysis" | "ai" | "security" | "reports";
 
 const VIEW_LABEL: Record<View, string> = {
     upload: "Upload",
     analysis: "Analysis",
     ai: "AI Analysis",
+    security: "Security",
     reports: "Reports",
 };
 
@@ -78,6 +82,11 @@ export default function App() {
         configure(mode, apiBase);
         setRun(id);
         setRunId(id);
+        /* Both are addresses in the outgoing binary. Carrying them into the next
+         * one would produce a trail of crumbs that resolve to nothing and a root
+         * that may name an unrelated function at the same offset. */
+        setNav({ trail: [], index: -1 });
+        setRootVa(null);
         setMessage(`Loading run ${id} ...`);
         try {
             const [nextImage, nextFunctions, nextFindings, nextStrings] = await Promise.all([
@@ -191,6 +200,12 @@ export default function App() {
                     enabled: loaded,
                     run: () => setView("ai"),
                 },
+                {
+                    label: "Security",
+                    checked: view === "security",
+                    enabled: loaded,
+                    run: () => setView("security"),
+                },
                 { label: "Reports", checked: view === "reports", run: () => setView("reports") },
             ],
         },
@@ -250,6 +265,86 @@ export default function App() {
         },
     ], [view, mode, loaded, runId, image, findings, loadRun, n8nReady]);
 
+    /* --- Navigation history --------------------------------------------- */
+
+    /* Lives here rather than in AnalysisView because both tabs navigate, and two
+     * histories that each saw half the moves is worse than none.
+     *
+     * One piece of state, not two. `trail` and `index` change together on every
+     * move, and as separate useStates a stale closure could advance one without
+     * the other — which shows up as a breadcrumb pointing at the wrong crumb. */
+    const [nav, setNav] = useState<{ trail: string[]; index: number }>({
+        trail: [], index: -1,
+    });
+    /* The function under investigation, if one has been pinned. Separate from
+     * the trail on purpose: the trail is where you have been, this is what for.
+     * Survives navigation; cleared when the run changes, since an address means
+     * nothing in a different binary. */
+    const [rootVa, setRootVa] = useState<string | null>(null);
+    // Read inside callbacks that must not re-create themselves on every move.
+    const navRef = useRef(nav);
+    useEffect(() => { navRef.current = nav; }, [nav]);
+    /* The address a Back/Forward/crumb jump is expecting, or null.
+     *
+     * A jump's selection comes back through the same path as a fresh click, and
+     * without this the trail would grow every time you tried to retrace it —
+     * going back would append the destination instead of moving the pointer.
+     *
+     * It holds the address rather than a boolean because a jump can fail: if the
+     * function will not load, no selection arrives and a boolean would stay set,
+     * silently swallowing the next genuine navigation. Comparing addresses means
+     * a mismatch is treated as the real move it is. */
+    const replayingTo = useRef<string | null>(null);
+
+    const recordVisit = useCallback((va: string) => {
+        if (replayingTo.current === va) { replayingTo.current = null; return; }
+        replayingTo.current = null;
+        setNav(({ trail, index }) => {
+            // Re-selecting what is already current is not a move.
+            if (trail[index] === va) return { trail, index };
+            // Navigating after going back discards the forward entries, the way
+            // a browser does: they describe a future you did not take.
+            const kept = [...trail.slice(0, index + 1), va];
+            // Capped so a long session cannot grow without bound. Dropping the
+            // oldest is right — a trail is about recent descent.
+            const capped = kept.slice(-40);
+            return { trail: capped, index: capped.length - 1 };
+        });
+    }, []);
+
+    const goToHistory = useCallback((index: number) => {
+        const { trail } = navRef.current;
+        if (index < 0 || index >= trail.length) return;
+        replayingTo.current = trail[index];
+        setNav((current) => ({ ...current, index }));
+        setView("analysis");
+        setPendingFunction(trail[index]);
+    }, []);
+
+    /* Alt+Arrow matches every browser. Esc is IDA's, and RE people reach for it
+     * without thinking — but only when nothing else wants it, so a floating
+     * window or a pinned card keeps first claim on the key. */
+    useEffect(() => {
+        const onKey = (event: KeyboardEvent) => {
+            if (event.defaultPrevented) return;
+            const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(
+                (event.target as HTMLElement)?.tagName ?? "");
+            if (typing) return;
+
+            if (event.altKey && event.key === "ArrowLeft") {
+                event.preventDefault();
+                goToHistory(navRef.current.index - 1);
+            } else if (event.altKey && event.key === "ArrowRight") {
+                event.preventDefault();
+                goToHistory(navRef.current.index + 1);
+            } else if (event.key === "Escape" && navRef.current.index > 0) {
+                goToHistory(navRef.current.index - 1);
+            }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [goToHistory]);
+
     /* --- Selection ------------------------------------------------------ */
 
     /* Loads a function and makes it the current selection, without changing view.
@@ -302,11 +397,11 @@ export default function App() {
             />
 
             <div className="viewnav">
-                {(["upload", "analysis", "ai", "reports"] as View[]).map((id) => {
-                    // Both Analysis and AI Analysis need a loaded run: one has
-                    // nothing to show without it, the other has nothing to ask
-                    // about.
-                    const enabled = (id !== "analysis" && id !== "ai") || loaded;
+                {(["upload", "analysis", "ai", "security", "reports"] as View[]).map((id) => {
+                    // Analysis, AI Analysis and Security all need a loaded run:
+                    // one has nothing to show, one nothing to ask about, and one
+                    // no binary to inspect.
+                    const enabled = !["analysis", "ai", "security"].includes(id) || loaded;
                     return (
                         <div
                             key={id}
@@ -339,17 +434,30 @@ export default function App() {
                 </div>
             </div>
 
-            {view === "upload" && (
-                <UploadView
-                    onOpenRun={(id, name) => {
-                        if (name) setFileName(name);
-                        void loadRun(id, true);
-                    }}
-                />
-            )}
+            {/* Always mounted: the upload progress poll lives inside it, and
+                switching to Reports mid-analysis used to stop the tracking. */}
+            <UploadView
+                hidden={view !== "upload"}
+                onOpenRun={(id, name) => {
+                    if (name) setFileName(name);
+                    void loadRun(id, true);
+                }}
+            />
 
-            {view === "ai" && loaded && (
+            {/* Mounted whenever a run is loaded, hidden rather than unmounted when
+                another tab is showing. An automated run is driven by this view's
+                own poll — it starts each stage when the previous one settles — so
+                unmounting it on a tab switch silently halted the run partway
+                through. Switching to Reports mid-run used to leave decompilation
+                finished and bug hunting never started, with no error to show for
+                it.
+
+                Reports is the only view still unmounted on a switch: it is a
+                list refetched on mount, holding no timer and no state a user
+                could lose. */}
+            {loaded && (
                 <AiAnalysisView
+                    hidden={view !== "ai"}
                     detail={selectedDetail}
                     onSelectFunction={(va) => void selectFunction(va)}
                     onOpenFunction={onOpenFunction}
@@ -359,7 +467,15 @@ export default function App() {
                     strings={strings}
                     findings={findings}
                     onExplainFinding={setOpenFinding}
+                    onGoHome={() => setView("upload")}
                 />
+            )}
+
+            {/* Conditional, unlike Analysis and AI: this view holds no timer and
+                no state a user could lose, and the backend remembers whether a
+                hardened build exists, so returning restores everything. */}
+            {view === "security" && loaded && (
+                <SecurityView fileName={fileName} onMessage={setMessage} />
             )}
 
             {view === "reports" && (
@@ -372,8 +488,44 @@ export default function App() {
                 />
             )}
 
+            {/* Only on Analysis: it describes a descent through functions, and
+                the other views do not have one. */}
             {view === "analysis" && loaded && (
+                <Breadcrumb
+                    trail={nav.trail}
+                    index={nav.index}
+                    functions={functions}
+                    onJump={goToHistory}
+                    onBack={() => goToHistory(nav.index - 1)}
+                    onForward={() => goToHistory(nav.index + 1)}
+                    onPinRoot={() => {
+                        const here = nav.trail[nav.index];
+                        if (here) setRootVa(here);
+                    }}
+                    rootPinned={rootVa !== null}
+                />
+            )}
+
+            {view === "analysis" && loaded && rootVa && (
+                <RootPath
+                    rootVa={rootVa}
+                    currentVa={nav.trail[nav.index] ?? null}
+                    runId={runId}
+                    functions={functions}
+                    onJump={onOpenFunction}
+                    onUnpin={() => setRootVa(null)}
+                />
+            )}
+
+            {/* Mounted for the life of the run, hidden when another tab shows.
+                Same reasoning as the AI tab above: this view owns the selected
+                function, the open graph window, the tree filter, the dock state
+                and every inline expansion, none of which survives an unmount and
+                none of which the shell can restore. Going to Reports and back
+                used to reset the workspace to the first function. */}
+            {loaded && (
                 <AnalysisView
+                    hidden={view !== "analysis"}
                     image={image}
                     functions={functions}
                     findings={findings}
@@ -381,7 +533,13 @@ export default function App() {
                     onMessage={setMessage}
                     gotoFunction={pendingFunction}
                     onGotoConsumed={() => setPendingFunction(null)}
-                    onSelectionChange={setSelectedDetail}
+                    onSelectionChange={(next) => {
+                        setSelectedDetail(next);
+                        // Every route into a function funnels through here —
+                        // tree, xrefs, search, call card — so this is the one
+                        // place the trail has to be recorded.
+                        if (next) recordVisit(next.va);
+                    }}
                     onExplainFinding={setOpenFinding}
                 />
             )}

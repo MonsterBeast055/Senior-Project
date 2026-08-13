@@ -19,14 +19,20 @@
  * — a finished run is only useful if you can click straight into what it found.
  */
 import { useCallback, useEffect, useState } from "react";
-import { getAiFindings, getBehaviourProfile, type AiFinding, type BehaviourProfile } from "../api/client";
+import {
+    getAiCoverage, getAiFindings, getBehaviourProfile,
+    type AiFinding, type BehaviourProfile,
+} from "../api/client";
 import type {
     ExtractedString, Finding, FindingsDocument, FunctionDetail, FunctionSummary,
     ImageInfo,
 } from "../api/types";
+import AiInputView from "./AiInputView";
+import ChoiceRun from "./ChoiceRun";
 import { Panel } from "./Chrome";
 import AutomatedRun from "./AutomatedRun";
 import FindingsBox from "./FindingsBox";
+import FloatingWindow from "./FloatingWindow";
 import SymbolTree from "./SymbolTree";
 
 interface Props {
@@ -41,11 +47,17 @@ interface Props {
     findings: FindingsDocument | null;
     /** Opens the finding detail window, which the shell owns. */
     onExplainFinding: (finding: Finding) => void;
+    /* Rendered but not shown. The shell keeps this tab mounted while you are on
+     * another one so a run in progress keeps advancing — see `.aipage.hidden`. */
+    hidden?: boolean;
+    /** Back to the upload page, without losing a run that is still going. */
+    onGoHome: () => void;
 }
 
 export default function AiAnalysisView({
     detail, onSelectFunction, onOpenFunction, onMessage,
     functions, image, strings, findings, onExplainFinding,
+    hidden = false, onGoHome,
 }: Props) {
     const [treeFilter, setTreeFilter] = useState("");
     const [aiFindings, setAiFindings] = useState<AiFinding[]>([]);
@@ -53,8 +65,18 @@ export default function AiAnalysisView({
     const [profile, setProfile] = useState<BehaviourProfile | null>(null);
     /** Bumped by the run each time a stage completes, to refetch results. */
     const [nonce, setNonce] = useState(0);
+    /** Addresses with a decompile result, for the tree's green marks. */
+    const [analysed, setAnalysed] = useState<Set<string>>(new Set());
+    const [choiceOpen, setChoiceOpen] = useState(false);
 
     const reload = useCallback(async () => {
+        /* Which functions have been through the model. Read from the stored
+         * results rather than the current job, so a function lifted on its own
+         * weeks ago still counts as analysed. */
+        try {
+            const coverage = await getAiCoverage();
+            setAnalysed(new Set(coverage.decompile ?? []));
+        } catch { /* the marks degrade to "engine only", which is not a lie */ }
         try {
             const document = await getAiFindings();
             if (document) {
@@ -69,8 +91,18 @@ export default function AiAnalysisView({
 
     useEffect(() => { void reload(); }, [reload, nonce, findings]);
 
+    /* Stable identity matters here. AutomatedRun's polling effect lists this in
+     * its dependencies, so an inline arrow — a new function on every render —
+     * tore the interval down and rebuilt it each time the job counters changed.
+     * It mostly survived that, but a render arriving faster than the poll period
+     * would keep resetting the timer and the run would stop advancing. */
+    const onRunProgress = useCallback((text: string) => {
+        onMessage(text);
+        setNonce((n) => n + 1);
+    }, [onMessage]);
+
     return (
-        <div className="aipage">
+        <div className={`aipage${hidden ? " hidden" : ""}`}>
             {/* The same tree as the Analysis tab. A finished run is only useful if
                 you can click from a result straight into the code behind it. */}
             <div className="aitree">
@@ -81,8 +113,16 @@ export default function AiAnalysisView({
                         strings={strings}
                         currentVa={detail?.va ?? null}
                         filter={treeFilter}
+                        analysed={analysed}
                         onOpenFunction={onSelectFunction}
                     />
+                    {/* Colour alone would fail a colour-blind reader and every
+                        printed copy of the report, so the legend spells it out. */}
+                    <div className="tree-legend">
+                        <span><span className="tmark mk-ai">●</span> AI</span>
+                        <span><span className="tmark mk-engine">●</span> engine only</span>
+                        <span><span className="tmark mk-limited">●</span> limited</span>
+                    </div>
                 </Panel>
                 <input
                     className="xp"
@@ -108,8 +148,20 @@ export default function AiAnalysisView({
             </div>
 
             <div className="aiwin">
-                <h1>AI Analysis</h1>
-                <p className="dim">
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                    <h1 style={{ margin: 0 }}>AI Analysis</h1>
+                    <span style={{ flex: 1 }} />
+                    {/* Leaving is safe now: the tab stays mounted and the run keeps
+                        going. Said on the button so nobody avoids clicking it. */}
+                    <button
+                        className="xp"
+                        onClick={onGoHome}
+                        title="Back to the upload page. A run in progress keeps going."
+                    >
+                        Home
+                    </button>
+                </div>
+                <p className="dim" style={{ marginTop: 6 }}>
                     Whole-binary passes. To decompile a single function, use{" "}
                     <b>Lift with AI</b> in the Decompiler pane on the Analysis tab —
                     this page is for running everything at once.
@@ -120,9 +172,120 @@ export default function AiAnalysisView({
                     overwritten; a model explains a rating here, it never sets one.
                 </p>
 
-                <AutomatedRun
-                    onMessage={(text) => { onMessage(text); setNonce((n) => n + 1); }}
-                />
+                <AutomatedRun onMessage={onRunProgress} onChooseRun={() => setChoiceOpen(true)} />
+
+                {choiceOpen && (
+                    <FloatingWindow
+                        title="Automated analysis — by choice"
+                        hint="pick the functions, and how deep to follow what they call"
+                        onClose={() => setChoiceOpen(false)}
+                        initial={{ x: 90, y: 70, width: 900, height: 620 }}
+                    >
+                        <ChoiceRun
+                            functions={functions}
+                            findings={findings}
+                            analysed={analysed}
+                            onClose={() => { setChoiceOpen(false); setNonce((n) => n + 1); }}
+                            onMessage={onMessage}
+                        />
+                    </FloatingWindow>
+                )}
+
+                {/* The run above sends one of these per function per stage. Being
+                    able to open one is the difference between "the AI analysed
+                    it" and being able to say what the AI was actually given. */}
+                <h2 style={{ marginTop: 14 }}>What gets sent to the model</h2>
+                {!detail && (
+                    <div className="empty">
+                        Pick a function in the tree to see the context that would be
+                        sent for it.
+                    </div>
+                )}
+                {detail && (
+                    <>
+                        <p className="dim">
+                            Every function in the run is sent a bundle like this, once
+                            per stage. Showing <b>{detail.name}</b> — select another in
+                            the tree to compare.
+                        </p>
+                        <AiInputView va={detail.va} name={detail.name} />
+                    </>
+                )}
+
+                {/* --- What the run actually found -----------------------------
+                    These are the point of the pass, and they were readable only
+                    in the 260px sidebar, where every title truncated to
+                    "Indirect Call to Impo...". The box on the left stays: it is
+                    how you navigate between findings and it merges the engine's
+                    with the model's. This is where you read them. */}
+                <h2 style={{ marginTop: 14 }}>
+                    Defects reported by the model
+                    {aiFindings.length > 0 && (
+                        <span className="dim" style={{ fontWeight: "normal" }}>
+                            {"  "}{aiFindings.length}
+                        </span>
+                    )}
+                </h2>
+
+                {aiFindings.length === 0 && (
+                    <div className="empty">
+                        Nothing reported yet. Run the automated analysis, or use
+                        <b> Find bugs</b> on a single function.
+                    </div>
+                )}
+
+                {aiFindings.map((finding, index) => (
+                    <div
+                        key={`${finding.function}-${finding.api}-${index}`}
+                        className="aifinding"
+                    >
+                        <div className="aif-head">
+                            {/* Severity is the engine's or absent. A model-only
+                                lead gets no rating rather than borrowing one. */}
+                            {finding.severity
+                                ? <span className={`sev ${finding.severity}`}>{finding.severity}</span>
+                                : <span className="dim">no rating</span>}
+                            <span
+                                className={finding.engine_corroborated ? "fbsrc engine" : "fbsrc ai"}
+                                title={finding.engine_corroborated
+                                    ? "A static finding stands behind this issue"
+                                    : "The engine never flagged this — a lead, not a result"}
+                            >
+                                {finding.engine_corroborated ? "corroborated" : "unconfirmed"}
+                            </span>
+                            {finding.stale && (
+                                <span className="fbsrc ai" title="Reasoned from a decompilation that has since been replaced">
+                                    stale
+                                </span>
+                            )}
+                            <b>{finding.kind}</b>
+                        </div>
+
+                        <div className="aif-body">{finding.detail}</div>
+
+                        <div className="aif-foot">
+                            <span
+                                className="crumb"
+                                onClick={() => onSelectFunction(finding.function)}
+                                title="Open this function"
+                            >
+                                {finding.function_name || finding.function}
+                            </span>
+                            {finding.api && finding.api !== "—" && (
+                                <span className="mono dim">{"  "}{finding.api}</span>
+                            )}
+                            {finding.call_path.length > 0 && (
+                                <span className="dim">
+                                    {"  ·  path: "}
+                                    {finding.call_path.map((step) => step.name || step.va).join(" > ")}
+                                </span>
+                            )}
+                            {finding.model_confidence && (
+                                <span className="dim">{"  ·  model confidence "}{finding.model_confidence}</span>
+                            )}
+                        </div>
+                    </div>
+                ))}
 
                 {/* --- Behaviour profile: the run's whole-binary output --------- */}
                 <h2 style={{ marginTop: 14 }}>Capabilities</h2>

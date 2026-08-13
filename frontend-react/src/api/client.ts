@@ -10,8 +10,9 @@
  * the contract.
  */
 import type {
-    BinaryContext, FindingExplanation, FindingsDocument, ExtractedString,
-    FunctionDetail, FunctionSummary, Hex, ImageInfo, LiftedFunction, LiftState,
+    AiPayload, BinaryContext, CallGraphDocument, CallGraphEdge, FindingExplanation,
+    FindingsDocument, ExtractedString, FunctionDetail, FunctionSummary,
+    HardenResponse, Hex, ImageInfo, LiftedFunction, LiftState, MitigationsResponse,
     RunStatus, RunSummary, Severity,
 } from "./types";
 import {
@@ -129,6 +130,35 @@ export async function getStrings(): Promise<ExtractedString[]> {
 
 export const getFunction = (va: string) =>
     get<FunctionDetail | null>(`/functions/${va}`, sampleDetails[va] ?? null);
+
+/** Whole-image call graph. Needed to answer "what is this function in service
+ *  of", which per-function `callers`/`callees` cannot — that is one hop, and the
+ *  question spans the whole descent.
+ *
+ *  Sample mode synthesises it from the embedded function details rather than
+ *  shipping a second fixture, so offline browsing behaves the same. */
+export async function getCallGraph(): Promise<CallGraphDocument> {
+    if (mode === "sample") {
+        const edges: CallGraphEdge[] = [];
+        for (const detail of Object.values(sampleDetails)) {
+            for (const callee of detail.callees ?? []) {
+                edges.push({ from: detail.va, to: callee.va });
+            }
+        }
+        return {
+            nodes: sampleFunctions.map((f) => ({
+                va: f.va,
+                name: f.name,
+                is_thunk: f.is_thunk ?? false,
+                // Unknown offline, and claiming false would understate how
+                // incomplete a synthesised graph is.
+                has_indirect_calls: (f.indirect_call_count ?? 0) > 0,
+            })),
+            edges,
+        };
+    }
+    return fetchJson<CallGraphDocument>("/callgraph");
+}
 
 /* ======================================================================
  * n8n boundary
@@ -405,15 +435,24 @@ export async function requestFindingExplanation(
 export type AiTask = "decompile" | "bugs" | "behaviour";
 
 export interface AiJobItem {
-    state: "queued" | "sent" | "done" | "failed";
+    /** "stopped" is set on queued items when a run is halted: the request was
+     *  never sent, so it is neither done nor failed. */
+    state: "queued" | "sent" | "done" | "failed" | "stopped";
     name: string;
     score: number;
     error?: string;
+    /** When the request went out. Used to reclaim a dispatch that never came
+     *  back, so one lost reply cannot stall a stage indefinitely. */
+    sent_at?: number;
 }
 
 export interface AiJob {
     task: AiTask;
-    state: "not-started" | "running" | "done" | "empty" | "not-run";
+    /* "stopped" was missing here while the backend was already sending it, so
+     * the check that ends a halted run compared against a value TypeScript
+     * believed impossible. It compiled as dead code and Stop would have let the
+     * run advance to the next stage instead of ending. */
+    state: "not-started" | "running" | "done" | "empty" | "not-run" | "stopped";
     total: number;
     done: number;
     failed: number;
@@ -473,6 +512,108 @@ export async function startAiBatch(
     });
     if (!response.ok) throw new Error(`ai/${task} → HTTP ${response.status}`);
     return (await response.json()) as AiJob;
+}
+
+/* ======================================================================
+ * Mitigations
+ * ====================================================================== */
+
+/** Read-only inspection of the uploaded binary's mitigation state. */
+export async function getMitigations(): Promise<MitigationsResponse | null> {
+    if (mode === "sample") return null;
+    const response = await fetch(`${base}/runs/${runId}/mitigations`);
+    if (response.status === 404) return null;
+    if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `mitigations → HTTP ${response.status}`);
+    }
+    return (await response.json()) as MitigationsResponse;
+}
+
+/** Produce a hardened copy. The uploaded original is never modified. */
+export async function hardenBinary(
+    options: { allowSigned?: boolean; fixWx?: boolean } = {},
+): Promise<HardenResponse> {
+    const response = await fetch(`${base}/runs/${runId}/harden`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            allow_signed: options.allowSigned === true,
+            fix_wx: options.fixWx === true,
+        }),
+    });
+    if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `harden → HTTP ${response.status}`);
+    }
+    return (await response.json()) as HardenResponse;
+}
+
+/** Direct link, so the browser downloads it rather than the app buffering it. */
+export function hardenedDownloadUrl(): string {
+    return `${base}/runs/${runId}/hardened`;
+}
+
+/** What would be sent to the model for one function, without sending it. */
+export async function getAiPayload(task: AiTask, va: string): Promise<AiPayload> {
+    const response = await fetch(`${base}/runs/${runId}/ai/${task}/${va}/payload`);
+    if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `payload → HTTP ${response.status}`);
+    }
+    return (await response.json()) as AiPayload;
+}
+
+/** Which functions already have AI results, per task. */
+export async function getAiCoverage(): Promise<Record<AiTask, string[]>> {
+    const empty = { decompile: [], bugs: [], behaviour: [] } as Record<AiTask, string[]>;
+    if (mode === "sample") return empty;
+    const response = await fetch(`${base}/runs/${runId}/ai/coverage`);
+    if (!response.ok) return empty;
+    return (await response.json()) as Record<AiTask, string[]>;
+}
+
+export interface SelectionPreview {
+    selected: string[];
+    /** True when the ceiling cut the expansion short. */
+    truncated: boolean;
+    ceiling: number;
+    depth: number;
+    from_findings: number;
+    functions: { va: string; name: string; information_score: number }[];
+}
+
+/** What a hand-picked selection would come to, without starting it. */
+export async function previewSelection(request: {
+    only?: string[];
+    depth?: number;
+    findings?: { function: string; api: string }[];
+}): Promise<SelectionPreview> {
+    const response = await fetch(`${base}/runs/${runId}/ai/preview`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `preview → HTTP ${response.status}`);
+    }
+    return (await response.json()) as SelectionPreview;
+}
+
+/** Stop a batch. Work already sent to the model still records if it returns. */
+export async function stopAiBatch(task: AiTask): Promise<AiJob> {
+    if (mode === "sample") return EMPTY_JOB(task);
+    const response = await fetch(`${base}/runs/${runId}/ai/${task}/stop`, { method: "POST" });
+    if (!response.ok) throw new Error(`ai/${task}/stop → HTTP ${response.status}`);
+    return (await response.json()) as AiJob;
+}
+
+/** Delete every AI result for this run, across all three tasks. */
+export async function resetAi(): Promise<void> {
+    if (mode === "sample") return;
+    const response = await fetch(`${base}/runs/${runId}/ai/reset`, { method: "POST" });
+    if (!response.ok) throw new Error(`ai/reset → HTTP ${response.status}`);
 }
 
 export const getAiResult = (task: AiTask, va: string) =>

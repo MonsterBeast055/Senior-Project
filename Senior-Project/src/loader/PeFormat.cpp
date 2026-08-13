@@ -33,6 +33,20 @@ std::uint64_t read_u64le(const std::uint8_t* p)
          | (static_cast<std::uint64_t>(read_u32le(p + 4)) << 32);
 }
 
+void write_u16le(std::uint8_t* p, std::uint16_t value)
+{
+    p[0] = static_cast<std::uint8_t>(value & 0xFF);
+    p[1] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
+}
+
+void write_u32le(std::uint8_t* p, std::uint32_t value)
+{
+    p[0] = static_cast<std::uint8_t>(value & 0xFF);
+    p[1] = static_cast<std::uint8_t>((value >> 8) & 0xFF);
+    p[2] = static_cast<std::uint8_t>((value >> 16) & 0xFF);
+    p[3] = static_cast<std::uint8_t>((value >> 24) & 0xFF);
+}
+
 std::vector<RuntimeFunction> parse_unwind_table(const std::uint8_t* data, std::size_t size)
 {
     std::vector<RuntimeFunction> functions;

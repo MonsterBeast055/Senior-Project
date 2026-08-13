@@ -16,7 +16,9 @@
  * because one unluckily-timed model refusal should not cost you the other 39.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getAiJob, startAiBatch, type AiJob, type AiTask } from "../api/client";
+import {
+    getAiJob, resetAi, startAiBatch, stopAiBatch, type AiJob, type AiTask,
+} from "../api/client";
 
 interface Stage {
     task: AiTask;
@@ -50,11 +52,13 @@ const STAGES: Stage[] = [
 
 interface Props {
     onMessage: (text: string) => void;
+    /** Opens the hand-picked selection dialog. Owned by the view above. */
+    onChooseRun?: () => void;
 }
 
-type RunState = "idle" | "running" | "done" | "blocked";
+type RunState = "idle" | "running" | "done" | "blocked" | "stopped";
 
-export default function AutomatedRun({ onMessage }: Props) {
+export default function AutomatedRun({ onMessage, onChooseRun }: Props) {
     const [state, setState] = useState<RunState>("idle");
     const [stageIndex, setStageIndex] = useState(-1);
     const [jobs, setJobs] = useState<Record<string, AiJob | null>>({});
@@ -89,14 +93,31 @@ export default function AutomatedRun({ onMessage }: Props) {
             const job = next[current.task];
             if (!job) return;
 
+            // A stopped stage is terminal: do not advance to the next one, or
+            // Stop would only pause the current stage and start the following.
+            if (job.state === "stopped") {
+                setState("stopped");
+                runningRef.current = false;
+                onMessage("Automated analysis stopped.");
+                return;
+            }
+
             const settled = job.state === "done" || job.state === "empty"
                 || (job.total > 0 && job.done + job.failed >= job.total);
             if (!settled) return;
 
             if (stageIndex + 1 < STAGES.length) {
+                const following = STAGES[stageIndex + 1];
                 setStageIndex(stageIndex + 1);
                 try {
-                    await startAiBatch(STAGES[stageIndex + 1].task, {});
+                    await startAiBatch(following.task, {});
+                    // The status bar is the only view of this from another tab,
+                    // and the run now continues while you are on one.
+                    onMessage(
+                        `Automated analysis: ${current.label.toLowerCase()} finished, `
+                        + `${following.label.toLowerCase()} started `
+                        + `(stage ${stageIndex + 2} of ${STAGES.length}).`,
+                    );
                 } catch (cause) {
                     setError((cause as Error).message);
                     setState("done");
@@ -137,9 +158,58 @@ export default function AutomatedRun({ onMessage }: Props) {
         }
     }
 
+    async function stop() {
+        const current = STAGES[stageIndex];
+        setState("stopped");
+        runningRef.current = false;
+        try {
+            // Every stage, not just the current one: an earlier stage can still
+            // have work in flight if this is a resumed run.
+            for (const stage of STAGES) await stopAiBatch(stage.task);
+            onMessage(`Automated analysis stopped${current ? ` during ${current.label.toLowerCase()}` : ""}.`);
+            await refresh();
+        } catch (cause) {
+            setError((cause as Error).message);
+        }
+    }
+
+    async function reset() {
+        // Destructive and not obviously so from the label, so it is confirmed.
+        const totalStored = STAGES.reduce((sum, s) => sum + (jobs[s.task]?.done ?? 0), 0);
+        const confirmed = window.confirm(
+            `Delete every AI result for this run?\n\n`
+            + `${totalStored} stored result${totalStored === 1 ? "" : "s"} across all three `
+            + `stages will be removed, including any you accepted. The engine's own `
+            + `analysis — functions, graphs, findings — is not touched.`,
+        );
+        if (!confirmed) return;
+
+        setError(null);
+        try {
+            await resetAi();
+            setState("idle");
+            setStageIndex(-1);
+            runningRef.current = false;
+            setJobs({});
+            await refresh();
+            onMessage("AI results cleared. Start automated analysis to run again.");
+        } catch (cause) {
+            setError((cause as Error).message);
+        }
+    }
+
     const totalDone = STAGES.reduce((sum, s) => sum + (jobs[s.task]?.done ?? 0), 0);
+    const totalFailed = STAGES.reduce((sum, s) => sum + (jobs[s.task]?.failed ?? 0), 0);
     const totalWork = STAGES.reduce((sum, s) => sum + (jobs[s.task]?.total ?? 0), 0);
-    const overall = totalWork > 0 ? Math.round((totalDone / totalWork) * 100) : 0;
+    /* Settled, not succeeded.
+     *
+     * The bar tracked `done` alone, so a run that finished with one failure sat
+     * at 20 of 21 with nothing to say why — and it could never reach the end,
+     * because the twenty-first function was never going to succeed. A stage is
+     * complete when every item has stopped moving; the failures are then
+     * reported separately rather than hidden as missing progress. */
+    const totalSettled = totalDone + totalFailed;
+    const overall = totalWork > 0 ? Math.round((totalSettled / totalWork) * 100) : 0;
 
     return (
         <div className="autorun">
@@ -159,9 +229,46 @@ export default function AutomatedRun({ onMessage }: Props) {
                 >
                     {state === "running" ? "Running…"
                      : state === "done" ? "Run again"
-                     : "Start automated analysis"}
+                     : state === "stopped" ? "Resume"
+                     : "Automated analysis by engine"}
                 </button>
+
+                {/* The engine's ranking is a default, not a monopoly. Someone who
+                    has read the findings usually knows better than the score. */}
+                {onChooseRun && (
+                    <button
+                        className="xp"
+                        disabled={state === "running"}
+                        onClick={onChooseRun}
+                        title="Pick the functions yourself, with a depth for their callees"
+                    >
+                        By choice…
+                    </button>
+                )}
+
+                {/* Only while there is something to stop. */}
+                {state === "running" && (
+                    <button
+                        className="xp"
+                        onClick={() => void stop()}
+                        title="Stop dispatching. Requests already sent are still recorded when they return."
+                    >
+                        Stop
+                    </button>
+                )}
+
                 <span style={{ flex: 1 }} />
+
+                <button
+                    className="xp"
+                    onClick={() => void reset()}
+                    disabled={state === "running" || totalDone === 0}
+                    title={totalDone === 0
+                        ? "Nothing to clear"
+                        : "Delete every stored AI result for this run and start from zero"}
+                >
+                    Reset
+                </button>
                 <button className="xp" onClick={() => void refresh()} disabled={state === "running"}>
                     Refresh
                 </button>
@@ -188,6 +295,17 @@ export default function AutomatedRun({ onMessage }: Props) {
                     </div>
                     <p className="dim" style={{ margin: "3px 0 0 0" }}>
                         {totalDone} of {totalWork} across all stages
+                        {totalFailed > 0 && (
+                            <span className="sev high">
+                                {"  "}{totalFailed} failed
+                            </span>
+                        )}
+                        {totalFailed > 0 && (
+                            <span>
+                                {"  "}— press <b>Start automated analysis</b> again to
+                                retry only those.
+                            </span>
+                        )}
                     </p>
                 </>
             )}
@@ -221,6 +339,14 @@ export default function AutomatedRun({ onMessage }: Props) {
                     );
                 })}
             </ul>
+
+            {state === "stopped" && (
+                <div className="notice" style={{ marginTop: 8 }}>
+                    <b>Stopped.</b> Everything completed so far is kept. Press{" "}
+                    <b>Resume</b> to carry on from here — finished functions are not
+                    paid for twice — or <b>Reset</b> to clear the lot and start over.
+                </div>
+            )}
 
             {state === "done" && (
                 <div className="notice" style={{ marginTop: 8 }}>

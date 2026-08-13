@@ -89,6 +89,149 @@ export interface FunctionRef {
     name: string;
 }
 
+/* ======================================================================
+ * Exploit mitigations
+ *
+ * What the image asks the loader for. Produced by `sp mitigations`, and raised
+ * by `sp harden`. Note there is no field here for a repaired defect: the engine
+ * has no value-level dataflow, so it cannot know a destination buffer's size,
+ * and a rewrite that guesses one could not be shown correct. Mitigations are a
+ * smaller claim that an external tool can verify.
+ * ====================================================================== */
+
+export interface MitigationReport {
+    parsed: boolean;
+    problem?: string;
+    format?: "PE32" | "PE32+";
+    dll_characteristics?: Hex;
+    aslr?: boolean;
+    high_entropy_va?: boolean;
+    dep?: boolean;
+    /** Reported only. It needs guard tables the compiler emits, so it cannot be
+     *  added to an existing binary. */
+    cfg?: boolean;
+    /** ASLR is refused without these: the loader could not rebase the image. */
+    has_relocations?: boolean;
+    relocations_stripped?: boolean;
+    /** Any edit invalidates an Authenticode signature. */
+    signed_image?: boolean;
+    checksum_valid?: boolean;
+    fully_hardened?: boolean;
+
+    /** Any section that is both writable and executable. */
+    has_write_execute?: boolean;
+    sections?: {
+        name: string;
+        read: boolean;
+        write: boolean;
+        execute: boolean;
+        /** Holds code rather than initialised data — decides which permission is
+         *  the safe one to remove. */
+        code: boolean;
+        write_execute: boolean;
+    }[];
+}
+
+export interface MitigationsResponse extends MitigationReport {
+    hardened?: {
+        available: boolean;
+        size?: number;
+        produced_at?: string;
+    };
+}
+
+export interface HardenResponse {
+    ok: boolean;
+    problem?: string;
+    input: string;
+    output: string | null;
+    /** One line per mitigation actually turned on. */
+    applied: string[];
+    /** One line per mitigation deliberately not applied, each with its reason.
+     *  A refusal is a result, not an error. */
+    refused: string[];
+    before: MitigationReport;
+    after: MitigationReport;
+    note?: string;
+}
+
+/* ======================================================================
+ * AI input
+ *
+ * The context assembled for one function, exactly as the dispatcher would send
+ * it. Exposed so the prompt is inspectable rather than something a reader has to
+ * take on trust — the same standard the rest of the analysis is held to.
+ * ====================================================================== */
+
+export interface AiPayloadCallee {
+    va: Hex;
+    name: string;
+    /** One paragraph, not code. Null when that callee has not been lifted yet —
+     *  the model then reasons from its imports instead of a description. */
+    summary: string | null;
+    api_calls: string[];
+    referenced_strings: string[];
+}
+
+export interface AiPayloadPathStep extends AiPayloadCallee {
+    /** The risky operation itself, as opposed to a hop on the way to it. */
+    is_sink: boolean;
+}
+
+export interface AiPayload {
+    task: string;
+    run_id: string;
+    va: Hex;
+    callback: string;
+    /** What the human said about the binary, if anything. */
+    context: BinaryContext | null;
+    image: Partial<ImageInfo> | null;
+    function: FunctionDetail | null;
+    callees: AiPayloadCallee[];
+    /** Populated for the bugs task only. */
+    call_path_context?: AiPayloadPathStep[];
+    engine_findings?: Finding[];
+    rules?: { severity_owner: string; note: string };
+    /** Added by the API for display; never sent to the model. */
+    _summary?: {
+        blocks: number;
+        instructions: number;
+        api_calls: number;
+        referenced_strings: number;
+        callees: number;
+        callees_with_summary: number;
+        engine_findings: number;
+        call_path_steps: number;
+        has_user_context: boolean;
+    };
+}
+
+/* --- Call graph (`callgraph.json`) --------------------------------------- */
+
+export interface CallGraphNode {
+    va: Hex;
+    name: string;
+    is_thunk: boolean;
+    /** This node's outgoing edges are incomplete: at least one call target was
+     *  not resolvable. A path search that fails may be failing because of this
+     *  rather than because no path exists, and must say so. */
+    has_indirect_calls: boolean;
+}
+
+export interface CallGraphEdge {
+    from: Hex;
+    to: Hex;
+}
+
+export interface CallGraphDocument {
+    schema_version?: string;
+    function_count?: number;
+    nodes: CallGraphNode[];
+    edges: CallGraphEdge[];
+    /** Bottom-up: leaves first. What the AI pass iterates. */
+    processing_order?: Hex[];
+}
+
 /** Row in the function index (`functions.json`). */
 export interface FunctionSummary {
     va: Hex;
@@ -291,6 +434,37 @@ export interface LiftedFunction {
     /** Populated when the validator agent (or the deterministic pre-checks)
      *  flagged something about this output. */
     warnings?: string[];
+
+    /* --- Failure ---------------------------------------------------------
+     * The AI layer posts a result even when the model call fails, because the
+     * queue cannot settle without one. These mark that case so the pane can say
+     * "this did not run" rather than presenting an apology as a decompilation
+     * with a confidence rating attached. */
+    parse_error?: boolean;
+    error?: string;
+    /** Why the provider stopped: "stop", "length", or absent. "length" with an
+     *  empty reply is the signature of a reasoning model whose thinking used the
+     *  whole output budget. */
+    finish_reason?: string | null;
+    /** The first part of the unparseable reply, kept so the cause can be seen
+     *  rather than inferred. */
+    raw_excerpt?: string;
+
+    /* --- Coverage --------------------------------------------------------
+     * How much of the function the generated C actually accounts for, derived
+     * by the backend from the provenance tags rather than reported by the
+     * model. Absent on results produced before this was measured. */
+    coverage?: {
+        blocks_total: number;
+        blocks_covered: number;
+        /** 0..1 */
+        fraction: number;
+        /** Blocks with no line of C attributed to them. */
+        missing: string[];
+        /** Tags naming a block this function does not contain. Non-empty means
+         *  the mapping is not trustworthy. */
+        unknown: string[];
+    } | null;
 
     /* --- Versioning ------------------------------------------------------
      * A function can be lifted twice: once by the automated pass, once by a user

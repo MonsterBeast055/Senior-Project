@@ -7,9 +7,12 @@
 //
 #include "sp/Pipeline.h"
 #include "sp/core/Log.h"
+#include "sp/harden/PeHardener.h"
+#include "sp/loader/PeFormat.h"
 #include "sp/serialize/DotExporter.h"
 #include "sp/serialize/JsonExporter.h"
 
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -17,6 +20,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -35,11 +39,19 @@ void print_usage(const char* program)
         << "  findings   <binary>            risky operations + input reachability\n"
         << "  export     <binary> --out DIR  manifest + per-function JSON (for n8n)\n"
         << "\n"
+        << "  mitigations <binary>           report ASLR/DEP/CFG state, no changes\n"
+        << "  harden      <binary> --out F   write a copy with mitigations enabled\n"
+        << "\n"
         << "options:\n"
         << "  --at <hex-va>    target function address\n"
-        << "  --out <dir>      output directory for `export`\n"
+        << "  --out <dir|file> output directory for `export`, output file for `harden`\n"
         << "  --no-sweep       skip the linear-sweep fallback\n"
         << "  --keep-thunks    include thunks and import stubs in `export`\n"
+        << "  --allow-signed   let `harden` edit a signed image, breaking its signature\n"
+        << "  --fix-wx         remove write-or-execute from a section holding both.\n"
+        << "                   Off by default: it is the one change that can break\n"
+        << "                   a packer or self-modifying code\n"
+        << "  --no-checksum    let `harden` leave a stale header checksum\n"
         << "  --compact        minified JSON\n"
         << "  --verbose        debug logging to stderr\n";
 }
@@ -51,6 +63,9 @@ struct Args {
     sp::core::VA at = sp::core::kInvalidVA;
     bool linear_sweep = true;
     bool keep_thunks = false;
+    bool allow_signed = false;
+    bool fix_wx = false;
+    bool fix_checksum = true;
     bool pretty = true;
     bool verbose = false;
     bool valid = false;
@@ -74,6 +89,12 @@ Args parse_args(int argc, char** argv)
             args.linear_sweep = false;
         } else if (std::strcmp(argv[i], "--keep-thunks") == 0) {
             args.keep_thunks = true;
+        } else if (std::strcmp(argv[i], "--allow-signed") == 0) {
+            args.allow_signed = true;
+        } else if (std::strcmp(argv[i], "--fix-wx") == 0) {
+            args.fix_wx = true;
+        } else if (std::strcmp(argv[i], "--no-checksum") == 0) {
+            args.fix_checksum = false;
         } else if (std::strcmp(argv[i], "--compact") == 0) {
             args.pretty = false;
         } else if (std::strcmp(argv[i], "--verbose") == 0) {
@@ -92,6 +113,155 @@ std::string hex(std::uint64_t value)
     std::ostringstream out;
     out << "0x" << std::hex << value;
     return out.str();
+}
+
+/* --- Mitigations ------------------------------------------------------------
+ *
+ * These two commands run before the Pipeline, and that is deliberate. They read
+ * and write header bytes; they need no disassembly, no CFG and no call graph.
+ * Making them wait for a full analysis would cost seconds per invocation for
+ * nothing, and would refuse to report on a file the disassembler chokes on -
+ * exactly the file whose mitigation state you most want to know.
+ */
+
+std::string json_escape(const std::string& text)
+{
+    std::string out;
+    out.reserve(text.size() + 8);
+    for (const char c : text) {
+        if (c == '"' || c == '\\') { out.push_back('\\'); out.push_back(c); }
+        else if (c == '\n') { out += "\\n"; }
+        else { out.push_back(c); }
+    }
+    return out;
+}
+
+void emit_report(std::ostream& out, const sp::harden::MitigationReport& report,
+                 const char* indent)
+{
+    out << indent << "\"parsed\": " << (report.parsed ? "true" : "false") << ",\n";
+    if (!report.parsed) {
+        out << indent << "\"problem\": \"" << json_escape(report.problem) << "\"\n";
+        return;
+    }
+    out << indent << "\"format\": \"" << (report.pe32_plus ? "PE32+" : "PE32") << "\",\n"
+        << indent << "\"dll_characteristics\": \"" << hex(report.dll_characteristics) << "\",\n"
+        << indent << "\"aslr\": " << (report.aslr ? "true" : "false") << ",\n"
+        << indent << "\"high_entropy_va\": " << (report.high_entropy_va ? "true" : "false") << ",\n"
+        << indent << "\"dep\": " << (report.dep ? "true" : "false") << ",\n"
+        << indent << "\"cfg\": " << (report.cfg ? "true" : "false") << ",\n"
+        << indent << "\"has_relocations\": " << (report.has_relocations ? "true" : "false") << ",\n"
+        << indent << "\"relocations_stripped\": "
+                  << (report.relocations_stripped ? "true" : "false") << ",\n"
+        << indent << "\"signed_image\": " << (report.signed_image ? "true" : "false") << ",\n"
+        << indent << "\"checksum_valid\": " << (report.checksum_valid ? "true" : "false") << ",\n"
+        << indent << "\"has_write_execute\": "
+                  << (report.has_write_execute() ? "true" : "false") << ",\n";
+
+    // Every section's permissions, so a W^X claim can be checked rather than
+    // believed. A reader can compare this against `dumpbin /headers` directly.
+    out << indent << "\"sections\": [";
+    for (std::size_t i = 0; i < report.sections.size(); ++i) {
+        const auto& section = report.sections[i];
+        out << (i == 0 ? "\n" : ",\n") << indent << "  {"
+            << "\"name\": \"" << json_escape(section.name) << "\", "
+            << "\"read\": " << (section.readable ? "true" : "false") << ", "
+            << "\"write\": " << (section.writable ? "true" : "false") << ", "
+            << "\"execute\": " << (section.executable ? "true" : "false") << ", "
+            << "\"code\": " << (section.code ? "true" : "false") << ", "
+            << "\"write_execute\": " << (section.write_execute() ? "true" : "false")
+            << "}";
+    }
+    out << (report.sections.empty() ? "]," : ("\n" + std::string(indent) + "],")) << "\n";
+
+    out << indent << "\"fully_hardened\": " << (report.fully_hardened() ? "true" : "false") << "\n";
+}
+
+void emit_strings(std::ostream& out, const std::vector<std::string>& items)
+{
+    out << "[";
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        out << (i == 0 ? "\n      \"" : ",\n      \"") << json_escape(items[i]) << "\"";
+    }
+    out << (items.empty() ? "]" : "\n    ]");
+}
+
+int run_mitigations(const Args& args)
+{
+    std::vector<std::uint8_t> bytes;
+    if (!sp::loader::read_file(args.path, bytes)) {
+        std::cerr << "cannot read " << args.path << "\n";
+        return 1;
+    }
+
+    const sp::harden::MitigationReport report = sp::harden::inspect(bytes);
+    std::cout << "{\n  \"schema_version\": \"1.0\",\n  \"mitigations\": {\n";
+    emit_report(std::cout, report, "    ");
+    std::cout << "  }\n}\n";
+    return report.parsed ? 0 : 1;
+}
+
+int run_harden(const Args& args)
+{
+    std::vector<std::uint8_t> bytes;
+    if (!sp::loader::read_file(args.path, bytes)) {
+        std::cerr << "cannot read " << args.path << "\n";
+        return 1;
+    }
+
+    sp::harden::HardenOptions options;
+    options.allow_signed = args.allow_signed;
+    options.enforce_write_xor_execute = args.fix_wx;
+    options.fix_checksum = args.fix_checksum;
+
+    const sp::harden::HardenResult result =
+        sp::harden::apply_mitigations(bytes, options);
+
+    // Never in place. The input is evidence; overwriting it would destroy the
+    // thing every stored finding was derived from.
+    std::filesystem::path destination = args.out_dir.empty()
+        ? std::filesystem::path(args.path).replace_extension(".hardened.exe")
+        : std::filesystem::path(args.out_dir);
+
+    bool written = false;
+    if (result.ok && result.changed()) {
+        std::ofstream file(destination, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            std::cerr << "cannot write " << destination.string() << "\n";
+            return 1;
+        }
+        file.write(reinterpret_cast<const char*>(bytes.data()),
+                   static_cast<std::streamsize>(bytes.size()));
+        written = file.good();
+        if (!written) {
+            std::cerr << "write failed: " << destination.string() << "\n";
+            return 1;
+        }
+    }
+
+    std::cout << "{\n"
+              << "  \"schema_version\": \"1.0\",\n"
+              << "  \"ok\": " << (result.ok ? "true" : "false") << ",\n"
+              << "  \"input\": \"" << json_escape(args.path) << "\",\n"
+              << "  \"output\": " << (written
+                     ? "\"" + json_escape(destination.string()) + "\"" : "null") << ",\n";
+    if (!result.ok) {
+        std::cout << "  \"problem\": \"" << json_escape(result.problem) << "\",\n";
+    }
+    std::cout << "  \"applied\": ";
+    emit_strings(std::cout, result.applied);
+    std::cout << ",\n  \"refused\": ";
+    emit_strings(std::cout, result.refused);
+    std::cout << ",\n  \"before\": {\n";
+    emit_report(std::cout, result.before, "    ");
+    std::cout << "  },\n  \"after\": {\n";
+    emit_report(std::cout, result.after, "    ");
+    std::cout << "  },\n"
+              << "  \"note\": \"Mitigations change how the loader treats this image. "
+                 "They do not repair the defects the analysis found - see the "
+                 "findings for those.\"\n}\n";
+
+    return result.ok ? 0 : 1;
 }
 
 // Batch export: analyse once, then write a manifest plus one file per function.
@@ -202,6 +372,15 @@ int main(int argc, char** argv)
 
     if (args.verbose) {
         sp::core::set_log_level(sp::core::LogLevel::Debug);
+    }
+
+    // Header-only commands, dispatched before the Pipeline so they neither pay
+    // for a full analysis nor depend on one succeeding.
+    if (args.command == "mitigations") {
+        return run_mitigations(args);
+    }
+    if (args.command == "harden") {
+        return run_harden(args);
     }
 
     sp::PipelineOptions options;

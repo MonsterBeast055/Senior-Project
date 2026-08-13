@@ -16,6 +16,8 @@ import type {
     ExtractedString, Finding, FindingsDocument, FunctionDetail, FunctionSummary,
     ImageInfo,
 } from "../api/types";
+import AiInputView from "./AiInputView";
+import CallCard, { type CallAnchor } from "./CallCard";
 import { Panel, TabStrip } from "./Chrome";
 import CfgGraph from "./CfgGraph";
 import Decompiler from "./Decompiler";
@@ -49,11 +51,17 @@ interface Props {
     /** The finding detail window is owned by the shell, because the AI Analysis tab
      *  opens it too. This only asks for it. */
     onExplainFinding: (finding: Finding) => void;
+    /* Rendered but not shown. This view owns a great deal of state that is
+     * expensive to rebuild and impossible to restore — which function is
+     * selected, which block, the open graph window, the tree filter, the dock,
+     * and every inline expansion in the decompiler. Unmounting on a tab switch
+     * threw all of it away and re-selected the first function on return. */
+    hidden?: boolean;
 }
 
 export default function AnalysisView({
     image, functions, findings, strings, onMessage, gotoFunction, onGotoConsumed,
-    onSelectionChange, onExplainFinding,
+    onSelectionChange, onExplainFinding, hidden = false,
 }: Props) {
     const breakpoint = useBreakpoint();
 
@@ -73,6 +81,11 @@ export default function AnalysisView({
     const [showLibraryStrings, setShowLibraryStrings] = useState(false);
     const [aiFindings, setAiFindings] = useState<AiFinding[]>([]);
     const [n8nConfigured, setN8nConfigured] = useState<boolean | null>(null);
+    // The call summary card: what a call does, answered where it is asked.
+    const [callAnchor, setCallAnchor] = useState<CallAnchor | null>(null);
+    // "What exactly are we sending the model?" — a window, like the graph, so it
+    // can sit beside the code it describes.
+    const [inputOpen, setInputOpen] = useState(false);
 
     // Which panes the centre tab strip must carry at this width.
     //
@@ -150,6 +163,50 @@ export default function AnalysisView({
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [gotoFunction]);
 
+    /* --- Call summary card ---------------------------------------------
+     *
+     * A pinned card outranks a hover: once you have clicked, sweeping the mouse
+     * across other call sites must not replace what you deliberately opened. */
+    const hoverCall = useCallback((va: string | null, element: HTMLElement | null) => {
+        setCallAnchor((current) => {
+            if (current?.pinned) return current;
+            if (va === null || element === null) return null;
+            return { va, rect: element.getBoundingClientRect(), pinned: false };
+        });
+    }, []);
+
+    const pinCall = useCallback((va: string, element: HTMLElement) => {
+        setCallAnchor({ va, rect: element.getBoundingClientRect(), pinned: true });
+    }, []);
+
+    /* The card is placed from a rectangle captured at hover time. Once the
+     * listing scrolls, that rectangle describes where the call site *was*, and a
+     * card anchored to a stale position is worse than no card. Dismiss instead of
+     * trying to track: the trigger is one mouse move away. */
+    useEffect(() => {
+        if (!callAnchor) return;
+        const drop = () => setCallAnchor(null);
+        window.addEventListener("scroll", drop, true);
+        window.addEventListener("resize", drop);
+        return () => {
+            window.removeEventListener("scroll", drop, true);
+            window.removeEventListener("resize", drop);
+        };
+    }, [callAnchor]);
+
+    /* A click anywhere else closes a pinned card. The card stops propagation on
+     * its own mousedown, so its buttons are exempt. */
+    useEffect(() => {
+        if (!callAnchor?.pinned) return;
+        const away = () => setCallAnchor(null);
+        window.addEventListener("mousedown", away);
+        return () => window.removeEventListener("mousedown", away);
+    }, [callAnchor?.pinned]);
+
+    // Navigating away takes the card with it — it describes a call site that is
+    // no longer on screen.
+    useEffect(() => { setCallAnchor(null); }, [detail?.va]);
+
     const selectBlock = useCallback((va: string) => {
         setSelectedBlock(va);
         const target = document.getElementById(`blk-${va}`);
@@ -186,6 +243,7 @@ export default function AnalysisView({
             detail={detail}
             selectedBlock={selectedBlock}
             onSelectBlock={selectBlock}
+            onShowInput={() => setInputOpen(true)}
         />
     ) : (
         <div className="empty">Select a function.</div>
@@ -202,7 +260,10 @@ export default function AnalysisView({
     );
 
     return (
-        <>
+        /* A wrapper, where this used to be a bare fragment. #app is a flex
+         * column and these were its direct children, so the host has to take
+         * over that role for the layout to survive being wrapped. */
+        <div className={`viewhost${hidden ? " hidden" : ""}`}>
             <div className="toolbar">
                 <span>Filter tree:</span>
                 <input
@@ -279,6 +340,8 @@ export default function AnalysisView({
                                     detail={detail}
                                     selectedBlock={selectedBlock}
                                     onSelectBlock={selectBlock}
+                                    onHoverCall={hoverCall}
+                                    onPinCall={pinCall}
                                 />
                             ) : (
                                 <div className="empty">Select a function.</div>
@@ -387,6 +450,33 @@ export default function AnalysisView({
                     {graph}
                 </FloatingWindow>
             )}
-        </>
+
+            {inputOpen && detail && (
+                <FloatingWindow
+                    title={`AI input — ${detail.name}`}
+                    hint="the exact context that would be sent to the model"
+                    onClose={() => setInputOpen(false)}
+                    initial={{ x: 110, y: 90, width: 760, height: 560 }}
+                >
+                    <AiInputView va={detail.va} name={detail.name} />
+                </FloatingWindow>
+            )}
+
+            {/* Outside the scrolling listing on purpose: it is positioned against
+                the viewport, so living inside a scroll container would clip it at
+                the pane edge. */}
+            <CallCard
+                anchor={callAnchor}
+                functions={functions}
+                onOpen={(va) => { setCallAnchor(null); void openFunction(va); }}
+                onShowInDecompiler={() => {
+                    // Deliberately does not change the selection: the point of
+                    // expansion is to read the callee without leaving the caller.
+                    setCallAnchor(null);
+                    if (centerTabs.includes("Decompiler")) setCenterTab("Decompiler");
+                }}
+                onDismiss={() => setCallAnchor(null)}
+            />
+        </div>
     );
 }

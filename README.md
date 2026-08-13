@@ -55,6 +55,8 @@ Senior-Project/
     │   │                       # DecodeQueue, CodeMap
     │   ├── analysis/           # FunctionDiscovery, CFG, CFGBuilder,
     │   │                       # CallGraph, XrefTable, SymbolTable,
+    │   │                       # ApiClassifier, Reachability,
+    │   │                       # StringExtractor, FunctionSummarizer,
     │   │                       # LoopAnalysis
     │   ├── lift/               # StructuralAnalysis, ContextBuilder
     │   └── serialize/          # JsonExporter, DotExporter
@@ -81,13 +83,20 @@ CFGBuilder        per-function basic blocks and edges
       ↓
 XrefTable         bidirectional cross-references
 CallGraph         function-to-function edges
+StringExtractor   literals, and which functions reference them
       ↓
-LoopAnalysis      dominators, natural loops, nesting
-StructuralAnalysis  if/else, while, switch recovery
+ApiClassifier     which imports are input sources, which are risky sinks
+Reachability      call paths from a source to a sink — the findings layer
       ↓
-ContextBuilder    per-function bundle for the model
+LoopAnalysis      dominators, natural loops, nesting          (stub)
+StructuralAnalysis  if/else, while, switch recovery           (stub)
+      ↓
+ContextBuilder    per-function bundle for the model           (stub)
 JsonExporter      one document serving both the UI and the AI layer
 ```
+
+The three stubbed stages are marked because the pipeline runs without them: they
+contribute nothing to the export today rather than blocking it.
 
 Disassembly strategy matters here. Recursive descent alone misses code reachable
 only through indirect calls; linear sweep alone misdecodes data embedded in
@@ -118,28 +127,60 @@ sp cfg       <binary> --at VA    CFG of one function as JSON
 sp dot       <binary> --at VA    CFG as Graphviz (development aid)
 sp callgraph <binary>            whole-image call graph
 sp context   <binary> --at VA    AI context bundle for one function
+
+sp mitigations <binary>          report ASLR/DEP/CFG state, changes nothing
+sp harden      <binary> --out F  write a copy with mitigations enabled
 ```
+
+`harden` never writes in place. The input is the evidence every stored finding
+was derived from, and overwriting it would destroy that.
 
 ## Status
 
 **Working end to end** (v1 spine complete): PE loading, disassembly with
 recursive descent plus linear-sweep fallback, function discovery from four
 sources, per-function CFG construction, cross-references, call graph, symbol
-resolution, and JSON/Graphviz export.
+resolution, string extraction, reachability-based findings, and JSON/Graphviz
+export.
 
 Implemented and unit tested: `core` (all), `db` (all), `PeFormat`,
 `InstructionStorage`, `CodeMap`, `DecodeQueue`, `CFG`, `CFGBuilder`,
-`SymbolTable`, `XrefTable`, `CallGraph`, `AnnotationStore`. 36 tests.
+`SymbolTable`, `XrefTable`, `CallGraph`, `AnnotationStore`, `Reachability`,
+`StringExtractor`, `JsonExporter`. 81 tests.
 
 Implemented, verified by build only (require LIEF/Capstone): `BinaryLoader`,
-`Disassembler`, `JsonExporter`, `DotExporter`, `Pipeline`.
+`Disassembler`, `DotExporter`, `Pipeline`.
+
+**Security findings are implemented**, in `analysis/` rather than a `findings/`
+directory: `ApiClassifier` labels imports as input sources or risky sinks, and
+`Reachability` looks for a call path between them. It is explicitly not taint
+analysis — a path proves a necessary condition for exploitability, not a
+sufficient one, and the output is worded to say so.
 
 **Deferred, stubbed with the intended approach documented at each site:**
-`LoopAnalysis` (dominators, natural loops), `StructuralAnalysis` (if/else and
-loop recovery), `ContextBuilder` (AI context bundles),
-`CallGraph::reverse_topological_order` (currently returns address order, not
-bottom-up), jump-table resolution, and the `findings/` layer (security findings
-and patch proposals).
+`LoopAnalysis` (dominators, dominance frontiers, natural loops — the accessors
+are real but nothing populates them), `StructuralAnalysis::analyze` (if/else and
+loop recovery; it returns a single honest `Irreducible` region holding the raw
+blocks), `ContextBuilder::build` and `to_prompt_payload` (AI context bundles),
+jump-table resolution, and patch proposals.
+
+**Mitigation hardening is implemented** in `harden/PeHardener`, the only part of
+the engine that writes a binary rather than reading one. It reports ASLR, DEP,
+high-entropy ASLR and CFG, and can enable the first three — refusing ASLR when
+there is no relocation data, refusing high-entropy ASLR on a 32-bit image, and
+refusing to touch a signed image unless told to. CFG is reported and never set,
+because it needs compiler-emitted guard tables; `/GS` is reported as
+unrepresentable rather than absent, because stack cookies are code, not a header
+bit. This does not repair the defects the analysis found — see the note at the
+top of `PeHardener.h` for why that is deliberate rather than unfinished.
+
+Two things inside those stubbed files *are* real and are relied on:
+`StructuralAnalysis::cyclomatic_complexity` (E − N + 2, and the number the UI
+shows), and `ContextBuilder::recommended_processing_order`, which delegates to
+`CallGraph::reverse_topological_order` — implemented with Tarjan's SCC algorithm,
+iterative to survive deep call chains, and reporting the cycles it finds. That is
+what makes bottom-up lifting work, so a caller's prompt carries summaries of what
+it calls.
 
 The original single-file prototype remains as `Senior-Project.cpp`, built via
 `-DSP_BUILD_LEGACY_PROTOTYPE=ON`. It can now be deleted - `BinaryLoader` and

@@ -181,8 +181,17 @@ async function writeMeta(runId, meta) {
 }
 
 /** Merge and persist. Serialised per run by patchJson, because progress patches
- *  arrive in bursts as the engine's stderr does. */
+ *  arrive in bursts as the engine's stderr does.
+ *
+ *  Refuses to create metadata that does not already exist. A run is created by
+ *  writeMeta at upload; every later write is an update. Without this guard a
+ *  late AI callback for a deleted run - or any summary refresh on an unknown id
+ *  - recreated the directory with nothing in it but summary fields, producing a
+ *  row in Reports with no name, no size and no id, whose Delete button asked for
+ *  /api/runs/undefined and got a 404. */
 async function patchMeta(runId, patch) {
+    const existing = await readMeta(runId);
+    if (!existing) return null;
     return patchJson(paths(runId).meta, patch);
 }
 
@@ -200,7 +209,21 @@ async function listRuns() {
     for (const entry of entries) {
         if (!entry.isDirectory() || !SAFE_ID.test(entry.name)) continue;
         const meta = await readMeta(entry.name);
-        if (meta) runs.push(meta);
+        if (!meta) continue;
+        /* The directory name is the authoritative run id, so stamp it rather
+         * than trusting the file to carry one.
+         *
+         * A meta written only by patchMeta - a summary refresh on a run whose
+         * metadata was never created - has no run_id at all. The table then
+         * rendered a row whose Delete button requested /api/runs/undefined and
+         * got a 404, leaving a broken row that could not be removed. */
+        runs.push({
+            ...meta,
+            run_id: meta.run_id || entry.name,
+            // Ids start with a sortable timestamp, so this keeps ordering sane
+            // even when the field is missing.
+            created_at: meta.created_at || entry.name,
+        });
     }
     // Newest first: the run someone just made is the one they want.
     runs.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));

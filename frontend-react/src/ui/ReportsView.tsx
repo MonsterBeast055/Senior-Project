@@ -9,7 +9,10 @@ import { useCallback, useEffect, useState } from "react";
 import { deleteRun, listRuns } from "../api/client";
 import type { RunSummary } from "../api/types";
 
-function humanSize(bytes: number): string {
+function humanSize(bytes: number | null | undefined): string {
+    // A run that failed before the engine wrote its metadata has no size, and
+    // arithmetic on undefined produced "NaN MB" in the table.
+    if (bytes == null || !Number.isFinite(bytes)) return "-";
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
@@ -112,9 +115,22 @@ export default function ReportsView({ currentRun, onOpenRun }: Props) {
                                         className={run.run_id === currentRun ? "selected" : undefined}
                                     >
                                         <td>
-                                            {run.file_name}
+                                            {/* An unfinished run has no file name. Falling back
+                                                to the id keeps the row identifiable, and saying
+                                                which stage it stopped at explains why Open is
+                                                disabled instead of leaving a blank row that
+                                                looks like a bug. */}
+                                            {run.file_name || (
+                                                <span className="mono dim">{run.run_id}</span>
+                                            )}
                                             {run.sha256 && (
                                                 <span className="dim mono"> {run.sha256}</span>
+                                            )}
+                                            {run.stage !== "done" && (
+                                                <span className="dim">
+                                                    {"  "}— did not complete
+                                                    {run.stage ? ` (stopped at ${run.stage})` : ""}
+                                                </span>
                                             )}
                                         </td>
                                         <td className="mono">{run.arch ?? "-"}</td>

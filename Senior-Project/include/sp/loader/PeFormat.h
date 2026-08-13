@@ -58,4 +58,10 @@ std::uint16_t read_u16le(const std::uint8_t* p);
 std::uint32_t read_u32le(const std::uint8_t* p);
 std::uint64_t read_u64le(const std::uint8_t* p);
 
+// Counterparts, for the one part of the system that writes a PE rather than
+// reading one. Same reasoning: explicit byte stores are correct on any host and
+// need no alignment guarantee.
+void write_u16le(std::uint8_t* p, std::uint16_t value);
+void write_u32le(std::uint8_t* p, std::uint32_t value);
+
 } // namespace sp::loader

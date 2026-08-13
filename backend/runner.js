@@ -277,4 +277,76 @@ async function probeEngine() {
     return { ok: true, path: binary, reason: "resolved through PATH at run time" };
 }
 
-module.exports = { startAnalysis, probeEngine, enginePath, STAGES, STAGE_PERCENT };
+/**
+ * Run one engine command that prints a JSON document and exits.
+ *
+ * `mitigations` and `harden` are not analyses: they read and write header bytes
+ * and produce a single document, with no stages to report and no long-running
+ * child to supervise. startAnalysis exists to stream progress out of a process
+ * that runs for seconds; forcing these through it would mean inventing progress
+ * for work that has none.
+ *
+ * A non-zero exit is not automatically an error here. `harden` exits 1 when it
+ * refuses - a signed image, or one that cannot be rebased - and the refusal IS
+ * the answer, printed as JSON on stdout. So the document is parsed first and the
+ * exit code consulted only when there is nothing to read.
+ */
+function runJsonCommand(args, { timeoutMs = 120_000 } = {}) {
+    return new Promise((resolve) => {
+        const binary = enginePath();
+        let child;
+        try {
+            child = spawn(binary, args, { windowsHide: true });
+        } catch (cause) {
+            resolve({ ok: false, error: `cannot start ${binary}: ${cause.message}` });
+            return;
+        }
+
+        let out = "";
+        let err = "";
+        let settled = false;
+
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            child.kill();
+            resolve({ ok: false, error: `${args[0]} timed out` });
+        }, timeoutMs);
+
+        child.stdout.on("data", (chunk) => { out += chunk; });
+        child.stderr.on("data", (chunk) => { err += chunk; });
+
+        child.on("error", (cause) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve({
+                ok: false,
+                error: cause.code === "ENOENT"
+                    ? `engine not found at ${binary}. Check SP_BINARY in backend/.env, `
+                      + `and that the engine has been rebuilt since the ${args[0]} `
+                      + `command was added.`
+                    : cause.message,
+            });
+        });
+
+        child.on("close", (code) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            try {
+                resolve({ ok: true, document: JSON.parse(out), exit_code: code });
+            } catch {
+                resolve({
+                    ok: false,
+                    error: err.trim() || out.trim() || `${args[0]} exited ${code} with no output`,
+                    exit_code: code,
+                });
+            }
+        });
+    });
+}
+
+module.exports = {
+    startAnalysis, probeEngine, enginePath, runJsonCommand, STAGES, STAGE_PERCENT,
+};

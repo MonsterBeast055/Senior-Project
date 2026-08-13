@@ -1,0 +1,167 @@
+{
+  "name": "Senior-Project AI layer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "analyze",
+        "responseMode": "onReceived",
+        "responseCode": 200,
+        "options": {}
+      },
+      "id": "9f1c0a10-0000-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -360,
+        0
+      ],
+      "webhookId": "9f1c0a10-0000-4000-8000-0000000000w1"
+    },
+    {
+      "parameters": {
+        "jsCode": "function envOr(name, fallback) {\n  try { return ($env && $env[name]) || fallback; } catch (e) { return fallback; }\n}\n\n/* Provider. Anything speaking the OpenAI chat-completions protocol works here:\n * Groq, OpenRouter, OpenAI, or a local Ollama at\n * http://<host>:11434/v1/chat/completions. */\nconst C = {\n  base: envOr('LLM_API_BASE', 'https://openrouter.ai/api/v1/chat/completions'),\n  key: envOr('LLM_API_KEY', 'sk-or-v1-PASTE-YOUR-OPENROUTER-KEY'),\n  model: envOr('LLM_MODEL', 'PASTE-YOUR-OPENROUTER-MODEL-ID')\n};\n\nconst p = $json.body || $json;\nif (!p.callback) { throw new Error('payload has no callback field'); }\n\n/* Model per task. decompile is the hard one; a capability sentence is not. */\nconst TASK_MODELS = {\n  decompile: envOr('LLM_MODEL_DECOMPILE', ''),\n  bugs: envOr('LLM_MODEL_BUGS', ''),\n  behaviour: envOr('LLM_MODEL_BEHAVIOUR', ''),\n  'explain-finding': envOr('LLM_MODEL_EXPLAIN', '')\n};\nconst taskModel = TASK_MODELS[p.task] || C.model;\n\n/* OpenRouter serves the same model from several hosts and orders them by price\n * by default, which is often the busiest. Ask for the fastest instead. */\nconst isOpenRouter = String(C.base).indexOf('openrouter.ai') !== -1;\nconst providerSort = envOr('LLM_PROVIDER_SORT', isOpenRouter ? 'throughput' : '');\n\nconst fallbackModels = String(envOr('LLM_MODEL_FALLBACKS', ''))\n  .split(',')\n  .map(function (s) { return s.trim(); })\n  .filter(Boolean);\n\nconst f = p.function || {};\nconst image = p.image || {};\n\nconst shownBlocks = [];\n\n/* 999 meant 'never truncate', which pushed prompts from ~1,850 to ~7,800\n * tokens and put a single request at 85% of a 12,000/minute budget. 48\n * blocks covers most real functions whole while keeping the prompt inside\n * what a free tier will serve; raise it on a paid tier. */\nconst MAX_BLOCKS = Number(envOr('LLM_MAX_BLOCKS', 120));\nconst MAX_INSNS_PER_BLOCK = Number(envOr('LLM_MAX_INSNS', 999));\nconst MAX_ASM_LINES = Number(envOr('LLM_MAX_ASM_LINES', 2000));\n\n/* Control-flow edges, rendered on the block header.\n *\n * The engine computes these and the payload has always carried them; the prompt\n * discarded them. Without edges the model reconstructs control flow by reading\n * jump targets out of operand strings - which works for a direct jump and fails\n * for anything else, and gives it no way to see that two branches reconverge.\n * C is structured and assembly is not, so this is the fact that most directly\n * decides whether the output is an if/else or a pile of gotos.\n *\n * `has_unresolved_exit` travels with it. A block with no successors is normally\n * a return; one with an unresolved exit is a jump table the analysis could not\n * follow, and the model must not describe it as a dead end. */\nfunction blockHeader(b) {\n  const edges = (b.successors || [])\n    .filter(function (s) { return s && s.target; })\n    .map(function (s) { return s.target + '(' + (s.kind || 'edge') + ')'; })\n    .join(' ');\n  return '//' + b.start\n    + (edges ? ' -> ' + edges : '')\n    + (b.has_unresolved_exit ? ' [unresolved exit: jump target not recovered]' : '');\n}\n\nconst allBlocks = f.blocks || [];\nconst asm = [];\nfor (const b of allBlocks.slice(0, MAX_BLOCKS)) {\n  if (!b.start) { continue; }\n  shownBlocks.push(b.start);\n  asm.push(blockHeader(b));\n  const insns = b.instructions || [];\n  for (const i of insns.slice(0, MAX_INSNS_PER_BLOCK)) {\n    asm.push((i.va || '') + ':' + (i.mnemonic || 'db') + ' ' + (i.operands || ''));\n  }\n  if (insns.length > MAX_INSNS_PER_BLOCK) {\n    asm.push('...+' + (insns.length - MAX_INSNS_PER_BLOCK));\n  }\n}\nif (allBlocks.length > MAX_BLOCKS) {\n  asm.push('...+' + (allBlocks.length - MAX_BLOCKS) + ' blocks');\n}\nif (asm.length > MAX_ASM_LINES) {\n  asm.length = MAX_ASM_LINES;\n  asm.push('...truncated');\n}\n\nconst blockList = shownBlocks;\n\nconst callees = (p.callees || []).slice(0, 12).map(function (c) {\n  const known = c.summary || ('(not lifted yet; imports ' + ((c.api_calls || []).join(', ') || 'none') + ')');\n  return '- ' + (c.name || c.va) + ': ' + known;\n}).join('\\n');\n\n/* The calling convention is a fixed property of the platform, not something\n * worth rediscovering from register traffic on every request. Stating it costs\n * one line and turns `mov rcx, rbx` into \"argument 1 = rbx\". */\nconst abi = image.arch === 'x86_64'\n  ? 'abi: Microsoft x64 - RCX,RDX,R8,R9 are integer args 1-4, XMM0-3 float args, '\n    + 'RAX returns, further args at [rsp+0x20], caller reserves 32 bytes shadow space'\n  : 'abi: 32-bit - arguments on the stack unless the convention below says otherwise';\n\n/* Frame layout. `local_size` bounds every stack buffer in the function, which is\n * the one number a bounds argument turns on. */\nconst frame = f.frame\n  ? 'frame: locals=' + f.frame.local_size\n    + ' saved_regs=' + f.frame.saved_regs_size\n    + ' frame_pointer=' + (f.frame.uses_frame_pointer ? 'yes (rbp)' : 'no (rsp-relative)')\n  : 'frame: not recovered';\n\nconst facts = [\n  'fn:' + (f.name || f.va) + '@' + f.va,\n  'arch:' + (image.arch || '?'),\n  'convention:' + (f.convention || 'unknown'),\n  abi,\n  frame,\n  'blocks:' + (f.block_count || 0) + ' insns:' + (f.instruction_count || 0),\n  'cc:' + (f.cyclomatic_complexity || 0),\n  'untrusted:' + (f.reachable_from_input ? 'y' : 'n'),\n  'imports:' + ((f.api_calls || []).join(',') || 'none'),\n  'strings:' + ((f.referenced_strings || []).join('|') || 'none'),\n  'unreachable_blocks:' + ((f.unreachable_blocks || []).join(',') || 'none'),\n  '',\n  'callees:',\n  callees || '(none)',\n  '',\n  'asm: block headers carry control-flow edges as  //<block> -> <target>(<kind>)',\n  asm.join('\\n')\n].join('\\n');\n\nconst RULES = 'Severity, reachability and call paths are derived by a static engine and are facts. '\n  + 'Explain them; never re-rate them. Reply with one JSON object and nothing else: no prose, no '\n  + 'markdown fences. NEVER use \"...\" or placeholder comments in the code field. Every assembly '\n  + 'block shown must have a corresponding C translation.';\n\nlet schema, ask;\n\nif (p.task === 'decompile') {\n  schema = JSON.stringify({\n    code: '<complete readable C for this function, real newlines, no placeholders>',\n    summary: '<one sentence: what this function does>'\n  });\n  ask = 'Reconstruct readable C for this function. Translate EVERY assembly block shown into C.'\n    + '\\n\\nUse the control-flow edges. Each block header is //<block> -> <target>(<kind>), where '\n    + 'kind is fall-through, taken, jump, indirect-jump, call or return. Two branches meeting at a '\n    + 'common successor is an if/else; an edge back to a dominating block is a loop. Recover those '\n    + 'structures rather than emitting goto for every branch. A block marked [unresolved exit] has '\n    + 'a jump whose target the analysis could not recover - say so in a comment; do not present it '\n    + 'as a dead end or invent a destination.'\n    + '\\n\\nUse the frame and convention lines. Stack slots below the frame pointer are locals: name '\n    + 'them local_<offset> and size them against the stated locals total. Registers holding '\n    + 'arguments on entry are arguments - name them accordingly rather than as raw registers.'\n    + '\\n\\nPadding and data-only blocks may be rendered as a comment saying what they are. A jump '\n    + 'table must NOT: reconstruct it as the control flow it implements, normally a switch, because '\n    + 'replacing it with a comment deletes a branch structure while appearing thorough.'\n    + '\\n\\nTag provenance on EVERY line. End each line of C with a comment //@ followed by the '\n    + 'address of the assembly block that line came from. Repeat the address on every line, even '\n    + 'when several lines in a row come from the same block - the tags are how coverage is measured, '\n    + 'and a line without one is recorded as not translated. Every block listed below must appear on '\n    + 'at least one line, including blocks that reduce to a single statement or a comment. Use only '\n    + 'these block addresses, exactly as written: '\n    + (blockList.join(', ') || '(none)')\n    + '. Do not invent an address. The tags are stripped before the code is stored; they exist so '\n    + 'the C can be lined up against the disassembly.';\n} else if (p.task === 'bugs') {\n  schema = JSON.stringify({\n    issues: [{\n      title: '<short title>',\n      detail: '<why this is a defect>',\n      engine_finding: '<exact api string from engine findings; omit when none applies>',\n      confidence: 'high|medium|low'\n    }]\n  });\n  ask = 'Identify defects in this function. The engine findings below are established facts. When '\n    + 'your issue corresponds to one, set engine_finding to that exact api string; when the engine '\n    + 'did not flag it, omit the field rather than inventing a value. Return an empty issues array '\n    + 'if you find nothing.'\n    + '\\n\\nThe frame line gives the total size of this function\\'s locals. A copy into a stack '\n    + 'buffer cannot exceed that total, so use it when arguing about bounds, and say when the '\n    + 'destination size is not determinable rather than assuming one.'\n    + '\\n\\nEngine findings:\\n' + JSON.stringify(p.engine_findings || [], null, 1)\n    + '\\n\\nCall path from the input source:\\n' + JSON.stringify(p.call_path_context || [], null, 1);\n} else if (p.task === 'behaviour') {\n  schema = JSON.stringify({ summary: '<one or two sentences on the capability shown>' });\n  ask = 'Describe the capability this function demonstrates. Describe ability, not intent: the '\n    + 'same APIs appear in installers, updaters and backup tools as in malware.';\n} else if (p.task === 'explain-finding') {\n  schema = JSON.stringify({\n    summary: '<what this code is doing>',\n    why_severity: '<why the rating the engine gave is defensible>',\n    impact: '<what an attacker could achieve>',\n    remediation: '<what a fix looks like, as advice>',\n    preconditions: ['<what the attacker still needs>'],\n    confidence: 'high|medium|low'\n  });\n  ask = 'Explain this finding, which the engine has already rated. Do not output a severity field.'\n    + '\\n\\nFinding:\\n' + JSON.stringify(p.finding || {}, null, 1);\n} else {\n  throw new Error('unknown task: ' + p.task);\n}\n\nconst systemText = 'You analyse one function of a Windows PE binary. ' + RULES\n  + ' Required shape: ' + schema;\nconst userText = ask + '\\n\\n' + facts;\nconst promptChars = systemText.length + userText.length;\n\nconst outputTokens = p.task === 'decompile' ? 4096 : 2048;\n\nreturn [{\n  json: {\n    provider_sort: providerSort || null,\n    prompt_chars: promptChars,\n    approx_tokens: Math.round(promptChars / 4),\n    asm_lines: asm.length,\n    blocks_shown: blockList.length,\n    blocks_total: allBlocks.length,\n    edges_shown: allBlocks.reduce(function (n, b) {\n      return n + ((b.successors || []).length);\n    }, 0),\n    api_base: C.base,\n    api_key: C.key,\n    model: taskModel,\n    task: p.task,\n    callback: p.callback,\n    blocks: blockList,\n    request_body: Object.assign(\n      {\n        model: taskModel,\n        temperature: 0.2,\n        max_tokens: outputTokens\n      },\n      fallbackModels.length > 0\n        ? { models: [taskModel].concat(fallbackModels) }\n        : {},\n      providerSort ? { provider: { sort: providerSort } } : {},\n      String(envOr('LLM_JSON_MODE', '1')) === '0'\n        ? {}\n        : { response_format: { type: 'json_object' } },\n      {\n        messages: [\n          { role: 'system', content: systemText },\n          { role: 'user', content: userText }\n        ]\n      }\n    )\n  }\n}];\n"
+      },
+      "id": "9f1c0a10-0000-4000-8000-000000000002",
+      "name": "Prepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -140,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.api_base }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $json.api_key }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "HTTP-Referer",
+              "value": "http://localhost:5173"
+            },
+            {
+              "name": "X-Title",
+              "value": "Senior-Project Binary Analyzer"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request_body) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "9f1c0a10-0000-4000-8000-000000000003",
+      "name": "Call model",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        80,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const prep = $('Prepare').first().json;\n\n/* Pull the //@<block> tags back out of the generated C.\n *\n * line_mapping is what links a line of C to a basic block, and therefore what\n * makes the decompiler, the disassembly and the graph one view instead of three\n * text boxes. Asking a model to emit the array directly does not work: it has to\n * count lines it has not written yet, and it invents plausible addresses. Asking\n * it to tag each line as it writes that line is a question it can answer, and\n * the array is then built here by counting - which is not a thing a model should\n * be doing anyway.\n *\n * Every address is checked against the real block list. A tag naming a block\n * that does not exist is dropped rather than stored: a mapping that points at\n * nothing would scroll the listing to the wrong place, and a wrong link is worse\n * than an absent one. */\nfunction stripMarkers(codeText, validBlocks) {\n  const valid = new Set(validBlocks || []);\n  const lines = [];\n  const mapping = [];\n  /* `current` is the block being translated, not a one-shot. A marker line\n   * opens a block and every line after it belongs to that block until the next\n   * marker. Carrying it forward is what turns one cheap tag per block into a\n   * mapping for every line. */\n  let current = null;\n  String(codeText).split('\\n').forEach(function (raw) {\n    const at = raw.lastIndexOf('//@');\n    let text = raw;\n    let address = null;\n    if (at >= 0) {\n      address = raw.slice(at + 3).trim();\n      text = raw.slice(0, at).trimEnd();\n    }\n    /* A marker alone on its line labels the code that FOLLOWS it, not the blank\n     * line it sits on. Models put the tag on its own line often enough that\n     * treating it as a normal line was visibly wrong: every mapping pointed one\n     * row above its statement, and the stripped remains left a blank row between\n     * every line of C. Carry the address forward and drop the empty line. */\n    // A marker alone on its line opens a block; it contributes no code.\n    if (address !== null && text.trim() === '') {\n      current = address;\n      return;\n    }\n    lines.push(text);\n    // A trailing tag also moves the cursor, so the older per-line style still\n    // produces a correct mapping.\n    if (address !== null) { current = address; }\n    const owner = current;\n    if (owner && (valid.size === 0 || valid.has(owner))) {\n      // Numbered by emitted lines, not source lines: dropped marker lines would\n      // otherwise shift every mapping after them.\n      mapping.push({ line: lines.length, block: owner });\n    }\n  });\n  return { code: lines.join('\\n'), line_mapping: mapping };\n}\n\nlet text = '';\ntry { text = $json.choices[0].message.content || ''; } catch (e) { text = ''; }\ntext = String(text).trim();\n\nif (text.slice(0, 3) === '```') {\n  text = text.replace(/^```[a-zA-Z]*\\n?/, '').replace(/```\\s*$/, '').trim();\n}\n\nlet out = null;\ntry { out = JSON.parse(text); } catch (e) { out = null; }\n\n/* Distinguish \"the model answered with something unusable\" from \"the call never\n * succeeded\". With onError=continueRegularOutput on the model node, a failed\n * call arrives here as an error object rather than a completion, and rate\n * limiting is by far the most common cause.\n *\n * Either way something MUST be posted back. If nothing is, the backend keeps\n * that function marked \"sent\", the batch never reaches done, and the automated\n * run sits at the same stage forever with no error to show for it. */\nconst noCompletion = !$json || !$json.choices;\nconst upstreamError = noCompletion && $json\n  ? ($json.error && ($json.error.message || $json.error)) || $json.message || 'model call failed'\n  : null;\n\n/* What the provider actually said, kept so a failure can be diagnosed from the\n * stored result rather than re-run and guessed at. */\nlet finishReason = null;\nlet rawExcerpt = '';\ntry {\n  const choice = ($json.choices || [])[0] || {};\n  finishReason = choice.finish_reason || null;\n  rawExcerpt = String(text || '').slice(0, 500);\n} catch (e) { /* diagnostics must never be the thing that fails */ }\n\nif (!out || typeof out !== 'object') {\n  let why;\n  if (upstreamError) {\n    why = 'The model call did not succeed: ' + upstreamError;\n  } else if (!rawExcerpt) {\n    // Empty content with finish_reason \"length\" is the signature of a reasoning\n    // model whose thinking consumed the whole max_tokens budget.\n    why = finishReason === 'length'\n      ? 'The model returned nothing and stopped at the output limit. If this is a '\n        + 'reasoning model, its thinking consumed the whole max_tokens budget '\n        + 'before any answer was produced - raise the limit or use a '\n        + 'non-reasoning model.'\n      : 'The model returned an empty reply.';\n  } else if (finishReason === 'length') {\n    why = 'The reply was cut off at the output limit, so it is not valid JSON. '\n        + 'Raise max_tokens for this task.';\n  } else {\n    why = 'The model reply could not be parsed as JSON. It answered, but not in '\n        + 'the requested shape.';\n  }\n  out = prep.task === 'bugs' ? { issues: [] } : { summary: why };\n  out.finish_reason = finishReason;\n  out.raw_excerpt = rawExcerpt;\n  // The backend treats a result carrying this flag as NOT done, so re-running\n  // the batch retries exactly these and leaves the good ones alone.\n  out.parse_error = true;\n  out.error = why;\n}\n\nout.model = prep.model;\n\n/* Token usage, straight from the provider. Input size was measurable locally;\n * output size was not, and it is what generation time actually tracks. Storing\n * it turns \"why is this slow\" into a number rather than a theory. */\ntry {\n  if ($json && $json.usage) {\n    out.usage = {\n      prompt_tokens: $json.usage.prompt_tokens || null,\n      completion_tokens: $json.usage.completion_tokens || null\n    };\n  }\n} catch (e) { /* usage is optional; never fail a result over it */ }\n\nif (prep.task === 'decompile' && typeof out.code === 'string') {\n  const split = stripMarkers(out.code, prep.blocks);\n  out.code = split.code;\n  // A model that returned the array itself is taken at its word; this only\n  // fills the gap, which is the normal case.\n  if (!Array.isArray(out.line_mapping) || out.line_mapping.length === 0) {\n    out.line_mapping = split.line_mapping;\n  }\n}\n\nif (prep.task === 'explain-finding' || prep.task === 'bugs') {\n  delete out.severity;\n  delete out.severity_source;\n}\n\nreturn [{ json: { callback: prep.callback, result: out } }];"
+      },
+      "id": "9f1c0a10-0000-4000-8000-000000000004",
+      "name": "Shape result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        300,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callback }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.result) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "9f1c0a10-0000-4000-8000-000000000005",
+      "name": "Send to backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Prepare",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare": {
+      "main": [
+        [
+          {
+            "node": "Call model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call model": {
+      "main": [
+        [
+          {
+            "node": "Shape result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape result": {
+      "main": [
+        [
+          {
+            "node": "Send to backend",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

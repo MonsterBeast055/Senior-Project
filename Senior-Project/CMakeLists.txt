@@ -55,6 +55,10 @@ add_library(sp_engine STATIC
     "src/lift/StructuralAnalysis.cpp"
     "src/lift/ContextBuilder.cpp"
 
+    # harden - the only part of the engine that writes a binary rather than
+    # reading one. LIEF-free, like the loader's PeFormat, for the same reason.
+    "src/harden/PeHardener.cpp"
+
     # serialize
     "src/serialize/JsonExporter.cpp"
     "src/serialize/DotExporter.cpp"

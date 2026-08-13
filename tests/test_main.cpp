@@ -14,6 +14,7 @@ void test_call_graph();
 void test_strings();
 void test_api_classifier();
 void test_reachability();
+void test_pe_hardener();
 
 int main()
 {
@@ -29,6 +30,7 @@ int main()
     test_strings();
     test_api_classifier();
     test_reachability();
+    test_pe_hardener();
 
     const auto& failures = sp::test::failures();
     if (failures.empty()) {

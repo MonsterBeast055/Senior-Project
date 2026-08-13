@@ -31,9 +31,14 @@ function humanSize(bytes: number): string {
 interface Props {
     /** File name is passed back so the shell can title the window with it. */
     onOpenRun: (runId: string, fileName?: string) => void;
+    /* Rendered but not shown. The progress poll lives in this component, so
+     * unmounting it while a binary is being analysed stopped the tracking: the
+     * engine kept working server-side, but nothing was left to notice it
+     * finishing or to open the workspace afterwards. */
+    hidden?: boolean;
 }
 
-export default function UploadView({ onOpenRun }: Props) {
+export default function UploadView({ onOpenRun, hidden = false }: Props) {
     const [dragOver, setDragOver] = useState(false);
     const [file, setFile] = useState<File | null>(null);
     const [uploadPercent, setUploadPercent] = useState<number | null>(null);
@@ -68,6 +73,16 @@ export default function UploadView({ onOpenRun }: Props) {
                     if (next.stage === "done") {
                         window.clearInterval(pollRef.current!);
                         onOpenRun(runId, chosen.name);
+                        /* Back to an empty dropzone once the workspace has the
+                         * run. This view is no longer unmounted on a tab switch
+                         * — that change was needed so leaving the tab mid-upload
+                         * does not kill the progress poll — so it now has to
+                         * clear itself, or returning to Upload shows a finished
+                         * run and no obvious way to start another. */
+                        setFile(null);
+                        setUploadPercent(null);
+                        setStatus(null);
+                        setError(null);
                     } else if (next.stage === "failed") {
                         window.clearInterval(pollRef.current!);
                         setError(next.error ?? "Analysis failed.");
@@ -97,7 +112,7 @@ export default function UploadView({ onOpenRun }: Props) {
     const stageIndex = status ? STAGES.findIndex((s) => s.key === status.stage) : -1;
 
     return (
-        <div className="page">
+        <div className={`page${hidden ? " hidden" : ""}`}>
             <div className="page-inner">
                 <h1>Analyse a binary</h1>
                 <p>

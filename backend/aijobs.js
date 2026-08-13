@@ -24,6 +24,7 @@
  * every item sits in "not-run". The UI shows real counts instead of pretending
  * nothing was asked.
  */
+const fs = require("fs/promises");
 const path = require("path");
 
 const store = require("./store");
@@ -31,8 +32,33 @@ const store = require("./store");
 const TASKS = ["decompile", "bugs", "behaviour"];
 
 /* Concurrency towards n8n. Above a handful, a model provider starts rate-limiting
- * and the failures look like our bug rather than their throttle. */
-const DISPATCH_WINDOW = 4;
+ * and the failures look like our bug rather than their throttle.
+ *
+ * Four was too many in practice. Free and low tiers meter by requests per
+ * minute, not by concurrency, so a burst of four every time a result lands
+ * walks straight into a 429 even though only four are ever in flight. Lower the
+ * window AND space the requests out: the window bounds how many are open at
+ * once, the gap bounds how fast they leave. Both are needed - a window of one
+ * with no gap still fires as fast as the model can answer. */
+const DISPATCH_WINDOW = Math.max(1, Number(process.env.AI_CONCURRENCY || 2));
+const MIN_DISPATCH_GAP_MS = Math.max(0, Number(process.env.AI_MIN_GAP_MS || 1500));
+
+/* How long a dispatched item may sit without a callback before it is counted as
+ * failed. Long enough to cover a slow model plus the workflow's own retries,
+ * short enough that a lost reply does not hang the run for the afternoon. */
+const SEND_TIMEOUT_MS = Math.max(30_000, Number(process.env.AI_SEND_TIMEOUT_MS || 300_000));
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/* Best-effort spacing, module-wide rather than per job: the provider's quota is
+ * shared across every task and run, so pacing each job separately would let
+ * three concurrent batches triple the rate. */
+let lastDispatchAt = 0;
+async function paceDispatch() {
+    const wait = lastDispatchAt + MIN_DISPATCH_GAP_MS - Date.now();
+    if (wait > 0) await sleep(wait);
+    lastDispatchAt = Date.now();
+}
 
 /* Default ceiling when the caller names one. Manual mode does; automated mode
  * does not, and asking a user "how many functions?" is exactly the decision
@@ -45,11 +71,17 @@ const DEFAULT_LIMIT = 40;
  * a small utility might yield 12 functions and a browser 400. */
 const WORTH_REVIEW_SCORE = 20;
 
-/* Hard ceiling on an automatic run. Not a tuning knob - a safety rail.
- * kernel32.dll has 1693 exports, and an unbounded automated pass over it would
- * be thousands of model calls started by one click. If a binary exceeds this,
- * the highest-scoring functions win and the job says how many were left out. */
-const MAX_AUTOMATIC = 200;
+/* Ceiling on an automatic run. If a binary exceeds it, the highest-scoring
+ * functions win and the job says how many were left out.
+ *
+ * It began as a pure safety rail at 200 - kernel32.dll has 1693 exports, and an
+ * unbounded pass over it would be thousands of model calls from one click. In
+ * practice 200 is far past what a free model tier will serve: 200 functions
+ * across three stages is 600 requests, which throttles long before it finishes.
+ *
+ * Now configurable, and defaulted low enough to complete reliably. Raise it
+ * once a paid tier or a local model removes the constraint. */
+const MAX_AUTOMATIC = Math.max(1, Number(process.env.AI_MAX_FUNCTIONS || 10));
 
 function jobFile(runId, task) {
     return path.join(store.paths(runId).root, `aijob-${task}.json`);
@@ -74,14 +106,28 @@ async function selectFunctions(runId, task, { limit = null, only = null } = {}) 
     const document = await store.readJson(path.join(p.analysis, "functions.json"));
     const all = document?.functions ?? [];
 
-    // An explicit list wins over selection entirely - that is the per-function
-    // path, and second-guessing a direct request would be wrong.
-    if (Array.isArray(only) && only.length > 0) {
-        const wanted = new Set(only);
-        return all.filter((f) => wanted.has(f.va));
-    }
-
+    /* An explicit list wins over selection entirely - that is the per-function
+     * path, and second-guessing a direct request would be wrong.
+     *
+     * It does NOT skip the ordering below. This used to return here, which was
+     * harmless while `only` always held one function: the moment a user selects
+     * twenty, address order means callers are decompiled before their callees,
+     * every prompt carries an empty summary for what it calls, and the output
+     * quietly gets worse with nothing to indicate why. Narrow the candidates and
+     * let the same ordering run. */
     let candidates = all.filter((f) => !f.is_thunk && !f.is_imported_stub && !f.is_library_code);
+
+    const explicit = Array.isArray(only) && only.length > 0;
+    if (explicit) {
+        const wanted = new Set(only);
+        // Filtered from `all`, not from `candidates`: a user who names a function
+        // gets that function. The thunk and library exclusions exist to stop
+        // automatic selection wasting money, not to overrule a direct request.
+        candidates = all.filter((f) => wanted.has(f.va));
+        // A named set is a decision already made; the score filter and the
+        // ceiling are both aids to choosing, and neither applies now.
+        limit = Math.max(candidates.length, 1);
+    }
 
     /* No limit means automated: derive the scope instead of asking for a number.
      *
@@ -187,7 +233,10 @@ async function selectFunctions(runId, task, { limit = null, only = null } = {}) 
      * The result is usually a small fraction of the binary - but it is the
      * fraction that matters, which is a better trade than sending everything.
      */
-    if (task === "bugs") {
+    // Skipped when the caller named a set: reachability selection exists to
+    // answer "which functions are worth hunting in", and that question has just
+    // been answered by a person.
+    if (task === "bugs" && !explicit) {
         const findings = await store.readJson(path.join(p.analysis, "findings.json"));
         const all_findings = findings?.findings ?? [];
 
@@ -272,6 +321,13 @@ async function getJob(runId, task) {
  * Functions that already have a result are counted as done rather than
  * re-dispatched. Re-running a batch after adding a few functions should not pay
  * for the ones already explained.
+ *
+ * `options.force` suppresses that skip, and exists because it made `Re-lift` a
+ * no-op: the single-function endpoints route through here too, so pressing
+ * Re-lift on a function that had already been lifted queued nothing, the job
+ * came back "done" without a request being sent, and the pane redisplayed the
+ * old text. Asking for one function by name is an explicit instruction to redo
+ * it; skipping is only right when the caller asked for a whole set.
  */
 async function startBatch(runId, task, options, dispatch) {
     if (!TASKS.includes(task)) {
@@ -296,8 +352,20 @@ async function startBatch(runId, task, options, dispatch) {
     const pending = [];
     let done = 0;
 
+    const force = options?.force === true;
+
     for (const fn of selected) {
-        const existing = await store.readJson(resultFile(runId, task, fn.va));
+        const stored = force
+            ? null
+            : await store.readJson(resultFile(runId, task, fn.va));
+        /* A result that records its own failure does not count as done.
+         *
+         * When the provider rate-limits, the workflow still posts back - it has
+         * to, or the batch would never complete - but it marks the body with
+         * parse_error. Counting that as done would mean the one action a user
+         * would naturally take, pressing Start again, skipped precisely the
+         * functions that failed and reported instant success. */
+        const existing = stored && stored.parse_error === true ? null : stored;
         if (existing) {
             items[fn.va] = { state: "done", name: fn.name, score: fn.information_score ?? 0 };
             done++;
@@ -307,23 +375,63 @@ async function startBatch(runId, task, options, dispatch) {
         }
     }
 
-    const job = {
-        task,
-        state: pending.length === 0 ? "done" : "running",
-        total: selected.length,
-        done,
-        failed: 0,
-        pending,
-        items,
-        started_at: new Date().toISOString(),
-        message:
-            pending.length === 0
-                ? "Every selected function already had a result."
-                : `${pending.length} queued, ${done} already done.`,
-    };
+    /* A named set joins the existing job; it does not replace it.
+     *
+     * `Lift with AI` on one function routes through here with only:[va], and
+     * this used to overwrite the job file. After a ten-function pass, one
+     * re-lift left a job of total 1 - so the progress bar read "1 of 1" and the
+     * record of the batch was gone. Worse, doing it while a pass was running
+     * discarded that pass's pending list and stopped it, with nothing on screen
+     * to say why.
+     *
+     * Whole-set runs still replace, because "start the automated analysis" means
+     * exactly that. */
+    const previous = explicit ? await getJob(runId, task) : null;
+    const merging = previous
+        && previous.items
+        && Object.keys(previous.items).length > 0;
+
+    let job;
+    if (merging) {
+        const mergedItems = { ...previous.items, ...items };
+        // Re-queue what was named, and keep anything already pending.
+        const mergedPending = [...new Set([...(previous.pending || []), ...pending])];
+        const values = Object.values(mergedItems);
+        job = {
+            ...previous,
+            task,
+            items: mergedItems,
+            pending: mergedPending,
+            total: Object.keys(mergedItems).length,
+            done: values.filter((i) => i.state === "done").length,
+            failed: values.filter((i) => i.state === "failed").length,
+            state: mergedPending.length > 0 || values.some((i) => i.state === "sent")
+                ? "running"
+                : "done",
+            message: `${mergedPending.length} queued of ${Object.keys(mergedItems).length}.`,
+        };
+    } else {
+        job = {
+            task,
+            state: pending.length === 0 ? "done" : "running",
+            total: selected.length,
+            done,
+            failed: 0,
+            pending,
+            items,
+            started_at: new Date().toISOString(),
+            message:
+                pending.length === 0
+                    ? "Every selected function already had a result."
+                    : `${pending.length} queued, ${done} already done.`,
+        };
+    }
 
     await store.writeJson(jobFile(runId, task), job);
-    if (pending.length > 0) void pump(runId, task, dispatch);
+    // Keyed off the job's own pending list, not the local one: after a merge the
+    // job may carry work this call did not add, and the dispatcher should pick
+    // that up too.
+    if (job.pending.length > 0) void pump(runId, task, dispatch);
     return job;
 }
 
@@ -349,13 +457,20 @@ async function pump(runId, task, dispatch) {
     // in "sent" is recoverable by re-running the batch; an item still "queued"
     // that was in fact dispatched would be paid for twice.
     for (const va of going) {
-        if (job.items[va]) job.items[va].state = "sent";
+        if (job.items[va]) {
+            job.items[va].state = "sent";
+            // Stamped so a request that never comes back can be reclaimed. See
+            // reapStalled: without this an item sits in "sent" forever and the
+            // job can never settle.
+            job.items[va].sent_at = Date.now();
+        }
     }
     job.pending = job.pending.slice(going.length);
     await store.writeJson(jobFile(runId, task), job);
 
     for (const va of going) {
         try {
+            await paceDispatch();
             await dispatch(runId, task, va);
         } catch (cause) {
             await recordFailure(runId, task, va, cause.message, dispatch);
@@ -461,6 +576,234 @@ async function recordFailure(runId, task, va, message, dispatch) {
     if (job.state === "running") void pump(runId, task, dispatch);
 }
 
+/**
+ * Reclaim dispatches that never came back.
+ *
+ * A batch settles when done + failed reaches total. An item marked "sent" is
+ * neither, so a single request that produces no callback stalls the stage
+ * permanently: `pending` empties, the count freezes one short — 199 of 200 —
+ * and because the automated run advances stage by stage on completion, bug
+ * hunting and behaviour never start either. The whole pass hangs on one lost
+ * reply, with nothing on screen to say so.
+ *
+ * The workflow is supposed to always post back, even on failure. This exists
+ * because "supposed to" is not a guarantee across a network, a container and a
+ * third-party model: n8n can be restarted mid-execution, a container can be
+ * killed, a callback can be refused. Something has to bound the wait.
+ *
+ * Called from the job-status route, so the UI's own polling drives recovery
+ * without needing a timer on the server.
+ */
+async function reapStalled(runId, task, dispatch) {
+    const job = await getJob(runId, task);
+    if (job.state !== "running") return job;
+
+    const now = Date.now();
+    let changed = false;
+    let reaped = 0;
+
+    for (const [va, item] of Object.entries(job.items)) {
+        if (item.state !== "sent") continue;
+        if (!item.sent_at) {
+            // Dispatched before stamping existed, or by an older build. Give it
+            // one full window rather than failing it on sight.
+            item.sent_at = now;
+            changed = true;
+            continue;
+        }
+        if (now - item.sent_at < SEND_TIMEOUT_MS) continue;
+        item.state = "failed";
+        item.error = `no result within ${Math.round(SEND_TIMEOUT_MS / 1000)}s`;
+        changed = true;
+        reaped++;
+    }
+
+    if (!changed) return job;
+
+    job.failed = Object.values(job.items).filter((i) => i.state === "failed").length;
+    if (job.pending.length === 0
+        && !Object.values(job.items).some((i) => i.state === "sent")) {
+        job.state = "done";
+        job.message =
+            `${job.done} of ${job.total} complete, ${job.failed} failed`
+            + (reaped > 0 ? ` (${reaped} timed out)` : "");
+    }
+    await store.writeJson(jobFile(runId, task), job);
+    if (job.state === "running" && job.pending.length > 0) void pump(runId, task, dispatch);
+    return job;
+}
+
+/** Ceiling on one hand-picked selection after depth expansion.
+ *
+ *  Expansion is exponential in the worst case: seven levels of a function with
+ *  ten callees each is ten million. The cap is what makes the depth control safe
+ *  to expose, and the caller is told what was cut rather than silently given a
+ *  truncated set. */
+const MAX_EXPANDED = Math.max(1, Number(process.env.AI_MAX_SELECTION || 120));
+
+/**
+ * Grow a chosen set of functions through their callees, `depth` levels down.
+ *
+ * depth 0  the chosen functions alone
+ * depth 1  those plus everything they call
+ * depth 2  and everything those call, and so on
+ *
+ * Three things make this safe rather than a foot-gun:
+ *
+ *   - a visited set, because binaries recurse and a plain walk would not
+ *     terminate on mutual recursion;
+ *   - breadth-first, so if the ceiling truncates it keeps the levels nearest
+ *     the chosen functions, which are the ones the user actually cared about;
+ *   - thunks, import stubs and library code are not followed. Expanding into the
+ *     CRT would spend the whole budget explaining Microsoft's code.
+ *
+ * Returns what was selected AND what it had to leave out, so the caller can say
+ * so before spending anything.
+ */
+async function expandSelection(runId, roots, depth) {
+    const p = store.paths(runId);
+    const document = await store.readJson(path.join(p.analysis, "functions.json"));
+    const index = new Map((document?.functions ?? []).map((f) => [f.va, f]));
+
+    const worthFollowing = (fn) =>
+        fn && !fn.is_thunk && !fn.is_imported_stub && !fn.is_library_code;
+
+    const selected = [];
+    const seen = new Set();
+    let frontier = [];
+
+    for (const va of roots) {
+        if (seen.has(va) || !index.has(va)) continue;
+        seen.add(va);
+        selected.push(va);
+        frontier.push(va);
+    }
+
+    const levels = Math.max(0, Math.min(Number(depth) || 0, 7));
+    let truncated = false;
+
+    for (let level = 0; level < levels && frontier.length > 0; level++) {
+        const next = [];
+        for (const va of frontier) {
+            const detail = await store.readJson(
+                path.join(p.functions, `func_${String(va).slice(2)}.json`),
+            );
+            for (const callee of detail?.callees ?? []) {
+                if (seen.has(callee.va)) continue;
+                seen.add(callee.va);
+                if (!worthFollowing(index.get(callee.va))) continue;
+                if (selected.length >= MAX_EXPANDED) { truncated = true; continue; }
+                selected.push(callee.va);
+                next.push(callee.va);
+            }
+        }
+        frontier = next;
+    }
+
+    return { selected, truncated, ceiling: MAX_EXPANDED, depth: levels };
+}
+
+/**
+ * The functions on the call paths of specific findings, plus their sinks.
+ *
+ * The automated bugs pass does this for every finding at once. Hunting one
+ * finding is the same question asked narrowly, and the call path is already
+ * derived, so the selection is a lookup rather than an analysis.
+ */
+async function selectionForFindings(runId, wanted) {
+    const p = store.paths(runId);
+    const document = await store.readJson(path.join(p.analysis, "findings.json"));
+    const all = document?.findings ?? [];
+
+    const keyed = new Set(wanted.map((w) => `${w.function}|${w.api}`));
+    const selected = [];
+    const seen = new Set();
+
+    for (const finding of all) {
+        if (!keyed.has(`${finding.function}|${finding.api}`)) continue;
+        for (const va of [finding.function, ...(finding.call_path ?? []).map((s) => s.va)]) {
+            if (seen.has(va)) continue;
+            seen.add(va);
+            selected.push(va);
+        }
+    }
+    return selected;
+}
+
+/**
+ * Stop a running batch.
+ *
+ * Drops the queue rather than trying to recall what is already in flight: a
+ * request sitting with the model cannot be withdrawn, and pretending otherwise
+ * would mean discarding a result that has been paid for. Anything already sent
+ * is still recorded when it comes back; `pump` will not start anything new
+ * because it refuses to run unless the job is "running".
+ */
+async function stopBatch(runId, task) {
+    const job = await getJob(runId, task);
+    if (job.state !== "running") return job;
+
+    for (const va of job.pending) {
+        if (job.items[va]) job.items[va].state = "stopped";
+    }
+    const inFlight = Object.values(job.items).filter((i) => i.state === "sent").length;
+    job.pending = [];
+    job.state = "stopped";
+    job.message =
+        `Stopped at ${job.done} of ${job.total}.`
+        + (inFlight > 0
+            ? ` ${inFlight} already sent will still be recorded if they return.`
+            : "");
+    await store.writeJson(jobFile(runId, task), job);
+    return job;
+}
+
+/**
+ * Delete everything an AI task has produced for this run: the job and every
+ * stored result, so the next start begins from nothing.
+ *
+ * Results are removed, not just the job, because the job is rebuilt from what
+ * is on disk — clearing only the job would have the next run count all the old
+ * results as done and finish instantly, which is the opposite of a reset.
+ */
+async function resetTask(runId, task) {
+    const dir = path.join(store.paths(runId).root, "ai", task);
+    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(jobFile(runId, task), { force: true });
+    return emptyJob(task);
+}
+
+/**
+ * Which functions already have a result, per task.
+ *
+ * Read from the result directory rather than from the job, because the job only
+ * knows about its own batch: a function lifted individually months of clicking
+ * ago is just as analysed, and the symbol tree needs to say so. A result marked
+ * `parse_error` does not count - it records a failure, not an analysis.
+ */
+async function analysedFunctions(runId) {
+    const out = {};
+    for (const task of TASKS) {
+        const dir = path.join(store.paths(runId).root, "ai", task);
+        const found = [];
+        let entries = [];
+        try {
+            entries = await fs.readdir(dir);
+        } catch {
+            out[task] = found;
+            continue;
+        }
+        for (const entry of entries) {
+            if (!entry.endsWith(".json")) continue;
+            const va = entry.slice(0, -5);
+            const stored = await store.readJson(path.join(dir, entry));
+            if (stored && stored.parse_error !== true) found.push(va);
+        }
+        out[task] = found;
+    }
+    return out;
+}
+
 /** One function's current result, or null. History travels with it. */
 async function getResult(runId, task, va) {
     return store.readJson(resultFile(runId, task, va));
@@ -486,6 +829,7 @@ async function isStale(runId, va, derivedFrom) {
 
 module.exports = {
     TASKS, DEFAULT_LIMIT, DISPATCH_WINDOW,
-    selectFunctions, startBatch, getJob, emptyJob, getResult,
+    selectFunctions, startBatch, getJob, emptyJob, getResult, reapStalled,
+    stopBatch, resetTask, expandSelection, selectionForFindings, analysedFunctions,
     recordResult, recordFailure, currentVersionId, isStale, versionId,
 };

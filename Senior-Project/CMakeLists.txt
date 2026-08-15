@@ -98,7 +98,10 @@ set_target_properties(sp_cli PROPERTIES OUTPUT_NAME "sp")
 # LIEF and Capstone call sequences while BinaryLoader and Disassembler are
 # filled in. Delete both this target and Senior-Project.cpp once that migration
 # is done.
-option(SP_BUILD_LEGACY_PROTOTYPE "Build the original single-file prototype" ON)
+# Off by default. It is superseded by BinaryLoader and Disassembler, and it is
+# named after the project - anyone cloning the repository and building it would
+# otherwise produce a `Senior-Project.exe` that is not the project.
+option(SP_BUILD_LEGACY_PROTOTYPE "Build the original single-file prototype" OFF)
 
 if(SP_BUILD_LEGACY_PROTOTYPE)
     add_executable(Senior-Project "Senior-Project.cpp" "Senior-Project.h")

@@ -354,6 +354,30 @@ async function startBatch(runId, task, options, dispatch) {
 
     const force = options?.force === true;
 
+    /* Whether a caller named the functions, rather than asking for a selection.
+     *
+     * `selectFunctions` computes the same thing from the same input, and reading
+     * its copy from here is a ReferenceError - the two are separate scopes. It
+     * has to be recomputed, not shared. */
+    const explicit = Array.isArray(options?.only) && options.only.length > 0;
+
+    /* How this work was asked for, recorded so the run can be read back later.
+     *
+     * Nothing on disk distinguished a function the engine picked from one a
+     * person picked, or told either apart from a single re-lift - every result
+     * looked the same afterwards, and "what have I actually run" had no answer.
+     * The distinction only exists at this moment, so it is written down here.
+     *
+     * The id is supplied by the caller when one user action spans several tasks:
+     * a hand-picked run of lift-then-bugs is one batch the person will look for,
+     * not two. Absent that, each call is its own. */
+    const batch = {
+        id: options?.batch || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        kind: !explicit ? "automated" : (options.only.length === 1 ? "single" : "batch"),
+        at: new Date().toISOString(),
+        size: selected.length,
+    };
+
     for (const fn of selected) {
         const stored = force
             ? null
@@ -366,11 +390,16 @@ async function startBatch(runId, task, options, dispatch) {
          * would naturally take, pressing Start again, skipped precisely the
          * functions that failed and reported instant success. */
         const existing = stored && stored.parse_error === true ? null : stored;
+        const base = {
+            name: fn.name,
+            score: fn.information_score ?? 0,
+            batch: batch.id,
+        };
         if (existing) {
-            items[fn.va] = { state: "done", name: fn.name, score: fn.information_score ?? 0 };
+            items[fn.va] = { ...base, state: "done" };
             done++;
         } else {
-            items[fn.va] = { state: "queued", name: fn.name, score: fn.information_score ?? 0 };
+            items[fn.va] = { ...base, state: "queued" };
             pending.push(fn.va);
         }
     }
@@ -400,6 +429,11 @@ async function startBatch(runId, task, options, dispatch) {
         job = {
             ...previous,
             task,
+            /* Batches accumulate. The merge exists so a single re-lift does not
+             * erase a ten-function pass; dropping that pass's batch record would
+             * erase it from the history instead, which is the same loss one
+             * level down. */
+            batches: { ...(previous.batches || {}), [batch.id]: batch },
             items: mergedItems,
             pending: mergedPending,
             total: Object.keys(mergedItems).length,
@@ -419,6 +453,10 @@ async function startBatch(runId, task, options, dispatch) {
             failed: 0,
             pending,
             items,
+            /* A whole-set run replaces the job, and with it the batch register.
+             * That is intended: "start the automated analysis" means this is the
+             * run now. Earlier batches survive on the results themselves. */
+            batches: { [batch.id]: batch },
             started_at: new Date().toISOString(),
             message:
                 pending.length === 0
@@ -779,30 +817,251 @@ async function resetTask(runId, task) {
  * Read from the result directory rather than from the job, because the job only
  * knows about its own batch: a function lifted individually months of clicking
  * ago is just as analysed, and the symbol tree needs to say so. A result marked
- * `parse_error` does not count - it records a failure, not an analysis.
+ * `parse_error` does not count as analysed - it records a failure, not an
+ * analysis - but it is not nothing either, so it is reported separately under
+ * `failed`. "Asked and it went wrong" and "never asked" need different marks;
+ * folding them together is what made a failed lift look like an idle function.
  */
 async function analysedFunctions(runId) {
     const out = {};
+    const failed = {};
     for (const task of TASKS) {
         const dir = path.join(store.paths(runId).root, "ai", task);
         const found = [];
+        const broke = [];
+        out[task] = found;
+        failed[task] = broke;
         let entries = [];
         try {
             entries = await fs.readdir(dir);
         } catch {
-            out[task] = found;
             continue;
         }
         for (const entry of entries) {
             if (!entry.endsWith(".json")) continue;
             const va = entry.slice(0, -5);
             const stored = await store.readJson(path.join(dir, entry));
-            if (stored && stored.parse_error !== true) found.push(va);
+            if (!stored) continue;
+            if (stored.parse_error === true) broke.push(va);
+            else found.push(va);
         }
-        out[task] = found;
+    }
+    out.failed = failed;
+    return out;
+}
+
+/**
+ * Per-function outcome for every task: what happened, and when nothing did, why.
+ *
+ * The counters on a job say "3 failed" and stop there, which is the wrong place
+ * to stop - a failure you cannot name is a failure you cannot retry deliberately.
+ * Neither the job nor the results directory can answer this alone:
+ *
+ *   the job      knows a request was dispatched and never came back, which is
+ *                invisible on disk because no result was ever written
+ *   the result   knows why a reply was unusable, which the job never sees
+ *
+ * So they are merged. `state` is what to show the reader:
+ *
+ *   issues    the model reported something
+ *   clean     the model answered and reported nothing - a result, not a silence
+ *   failed    a reply arrived and could not be used; `error` says how
+ *   waiting   dispatched, still outstanding
+ *   queued    accepted, not yet sent
+ *   skipped   not part of this run
+ */
+async function outcomes(runId) {
+    const out = {};
+    for (const task of TASKS) {
+        const job = await getJob(runId, task);
+        const rows = [];
+        const seen = new Set();
+
+        for (const [va, item] of Object.entries(job.items || {})) {
+            seen.add(va);
+            rows.push(await outcomeRow(runId, task, va, item));
+        }
+
+        /* Results with no job entry are not noise: a function lifted on its own
+         * weeks ago has no place in today's job and is still analysed. Leaving
+         * it out would make this list disagree with the tree's marks. */
+        const dir = path.join(store.paths(runId).root, "ai", task);
+        let entries = [];
+        try {
+            entries = await fs.readdir(dir);
+        } catch { /* nothing has run for this task */ }
+        for (const entry of entries) {
+            if (!entry.endsWith(".json")) continue;
+            const va = entry.slice(0, -5);
+            if (seen.has(va)) continue;
+            rows.push(await outcomeRow(runId, task, va, null));
+        }
+
+        rows.sort((a, b) => a.va.localeCompare(b.va));
+        out[task] = rows;
     }
     return out;
 }
+
+/** One row of {@link outcomes}. `item` is the job's entry, or null when the
+ *  result outlived the job that produced it. */
+async function outcomeRow(runId, task, va, item) {
+    const result = await getResult(runId, task, va);
+    const row = {
+        va,
+        name: item?.name ?? result?.function_name ?? va,
+        state: "skipped",
+        issues: null,
+        error: null,
+        /* The behaviour pass's prose, carried here so the tracking table can
+         * show it. The capability profile groups these under engine-matched
+         * rules, which means a function matching no rule has its description
+         * stored and nowhere to appear - the pass ran, produced something
+         * useful, and the interface had no place to put it. */
+        narrative: null,
+        finish_reason: result?.finish_reason ?? null,
+        received_at: result?.received_at ?? null,
+    };
+
+    if (result?.parse_error === true) {
+        row.state = "failed";
+        // The workflow puts its diagnosis in `summary` for the tasks that have
+        // one, and in `error` otherwise. Either way the reader wants the text,
+        // not the word "failed".
+        row.error = result.error || result.summary || "The reply could not be used.";
+        return row;
+    }
+
+    if (result) {
+        /* Only the bug pass can report "nothing found", because only it is
+         * looking for something. A lift produces C and a behaviour pass produces
+         * a description; neither has an `issues` array, and reading its absence
+         * as an empty one labelled every successful lift as the model having
+         * found nothing - which reads as a failure of exactly the kind this view
+         * exists to rule out. */
+        if (task !== "bugs") {
+            row.state = "done";
+            if (task === "behaviour") {
+                const text = typeof result.summary === "string"
+                    ? result.summary.trim() : "";
+                row.narrative = text || null;
+            }
+            return row;
+        }
+        const issues = Array.isArray(result.issues) ? result.issues.length : 0;
+        row.issues = issues;
+        row.state = issues > 0 ? "issues" : "clean";
+        return row;
+    }
+
+    // No result on disk. Only the job knows whether one is still coming.
+    if (item?.state === "sent") row.state = "waiting";
+    else if (item?.state === "queued") row.state = "queued";
+    else if (item?.state === "failed") {
+        row.state = "failed";
+        row.error = item.error || "Dispatch failed before a reply was received.";
+    }
+    return row;
+}
+
+/**
+ * The process-tracking view: every analysable function, what each task did for
+ * it, and how it came to be run.
+ *
+ * Built from the function list rather than from the jobs, so the table exists
+ * before anything has been run. A tracking view that is empty until you use it
+ * cannot tell you what is left to do, which is most of what it is for.
+ *
+ * `stages` carries the live job state alongside it. The alternative was three
+ * more requests from the client and three chances for them to disagree with
+ * each other about which stage is running.
+ */
+async function summary(runId) {
+    const p = store.paths(runId);
+    const document = await store.readJson(path.join(p.analysis, "functions.json"));
+    const all = document?.functions ?? [];
+
+    const cells = await outcomes(runId);
+    const byTaskVa = new Map();
+    for (const task of TASKS) {
+        for (const row of cells[task]) byTaskVa.set(`${task}:${row.va}`, row);
+    }
+
+    /* How each function came to be run, and when.
+     *
+     * A function can belong to several batches over time - picked up by the
+     * automated pass, then re-run alone when its result looked wrong. The most
+     * recent one is what the table reports, because that is the run whose result
+     * is on disk now. */
+    const origin = new Map();
+    const stages = [];
+    for (const task of TASKS) {
+        const job = await getJob(runId, task);
+        const register = job.batches || {};
+        for (const [va, item] of Object.entries(job.items || {})) {
+            const batch = register[item.batch] || null;
+            const at = batch?.at ?? null;
+            const previous = origin.get(va);
+            if (!previous || (at && (!previous.at || at > previous.at))) {
+                origin.set(va, { kind: batch?.kind ?? "unknown", at });
+            }
+        }
+        const items = Object.values(job.items || {});
+        stages.push({
+            task,
+            state: job.state ?? "idle",
+            total: job.total ?? 0,
+            done: job.done ?? 0,
+            failed: job.failed ?? 0,
+            /* Outstanding work, not the stored state: a job whose file says
+             * "running" after a restart has nothing in flight, and bolding it
+             * would point at a stage that is not happening. */
+            active: (job.pending?.length ?? 0) > 0
+                || items.some((i) => i.state === "sent"),
+        });
+    }
+
+    /* Excluded functions are left out - they are never sent, so three dashes
+     * each is noise - unless something was actually run on one, which means a
+     * person asked for it by name and deserves to see the result. */
+    const touched = new Set([...origin.keys()]);
+    for (const task of TASKS) {
+        for (const row of cells[task]) touched.add(row.va);
+    }
+
+    const rows = all
+        .filter((f) => touched.has(f.va)
+            || (!f.is_thunk && !f.is_imported_stub && !f.is_library_code))
+        .map((f) => {
+            const tasks = {};
+            for (const task of TASKS) {
+                const cell = byTaskVa.get(`${task}:${f.va}`);
+                tasks[task] = cell
+                    ? { state: cell.state, issues: cell.issues, error: cell.error }
+                    : { state: "none", issues: null, error: null };
+            }
+            const from = origin.get(f.va) ?? null;
+            return {
+                va: f.va,
+                name: f.name,
+                score: f.information_score ?? 0,
+                /* Lifted to the row rather than left on the behaviour cell: it
+                 * is a fact about the function, and the table shows it whether
+                 * or not the function matched a capability rule. */
+                narrative: byTaskVa.get(`behaviour:${f.va}`)?.narrative ?? null,
+                excluded: !!(f.is_thunk || f.is_imported_stub || f.is_library_code),
+                kind: from?.kind ?? null,
+                at: from?.at ?? null,
+                tasks,
+            };
+        });
+
+    // Highest triage score first: the same order the automated pass would pick
+    // them in, so the top of the table is the part that matters most.
+    rows.sort((a, b) => b.score - a.score);
+    return { stages, rows };
+}
+
 
 /** One function's current result, or null. History travels with it. */
 async function getResult(runId, task, va) {
@@ -831,5 +1090,6 @@ module.exports = {
     TASKS, DEFAULT_LIMIT, DISPATCH_WINDOW,
     selectFunctions, startBatch, getJob, emptyJob, getResult, reapStalled,
     stopBatch, resetTask, expandSelection, selectionForFindings, analysedFunctions,
+    outcomes, summary,
     recordResult, recordFailure, currentVersionId, isStale, versionId,
 };

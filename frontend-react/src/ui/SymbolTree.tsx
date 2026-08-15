@@ -42,33 +42,54 @@ interface TreeNode {
     fn?: FunctionSummary;
 }
 
-/* How far a function has been taken.
+/* How far a function has been taken by the AI layer.
  *
  * The engine analyses everything it discovers, so "not analysed by the engine"
- * would be an almost empty category and a useless colour. What is worth
- * distinguishing is where the engine's own result is unreliable — an unresolved
- * jump table leaves the control-flow graph incomplete at a known point — and
- * whether a model has been over it. */
-export type AnalysisState = "ai" | "engine" | "limited";
+ * would be an almost empty category and a useless colour. What the marks track
+ * instead is progress through the AI passes, because that is the thing that
+ * differs between one function and the next:
+ *
+ *   red     nothing has been asked of the model yet
+ *   red ✕   it was asked, and the reply could not be used
+ *   yellow  lifted to C, but no bug or behaviour pass over it
+ *   green   a bug or behaviour result exists
+ *   grey    never going to be sent — a thunk, stub, or library function
+ *
+ * The two reds are deliberately one colour and two glyphs. They mean the same
+ * thing to the person reading the tree — there is no usable AI result here —
+ * and the glyph says whether re-running is worth anything. Colour alone would
+ * also carry nothing on a printed page. */
+export type AnalysisState = "ai" | "decompiled" | "failed" | "pending" | "limited";
 
 const STATE_MARK: Record<AnalysisState, { glyph: string; cls: string; title: string }> = {
     ai: {
         glyph: "●",
         cls: "mk-ai",
-        title: "Decompiled by the AI layer",
+        title: "Analysed by the AI layer — a bug or behaviour result exists.",
     },
-    engine: {
+    decompiled: {
         glyph: "●",
-        cls: "mk-engine",
-        title: "Analysed by the engine. No AI result yet.",
+        cls: "mk-decompiled",
+        title: "Lifted to C by the AI layer. No bug or behaviour pass yet.",
+    },
+    failed: {
+        glyph: "✕",
+        cls: "mk-failed",
+        title:
+            "The AI layer was asked about this function and the reply could not "
+            + "be used. Running it again is worth a try.",
+    },
+    pending: {
+        glyph: "●",
+        cls: "mk-pending",
+        title: "Not sent to the AI layer yet.",
     },
     limited: {
         glyph: "●",
         cls: "mk-limited",
         title:
-            "The engine's own analysis is incomplete here — an unresolved jump "
-            + "target, or a thunk or library function that is deliberately never "
-            + "sent to the model.",
+            "Never sent to the model: a thunk, an imported stub, a library "
+            + "function, or a function with no recovered blocks.",
     },
 };
 
@@ -312,14 +333,34 @@ function flatten(
     return out;
 }
 
-/** Which mark a function gets. `analysed` holds the addresses with an AI result. */
-function stateOf(fn: FunctionSummary, analysed: Set<string>): AnalysisState {
-    if (analysed.has(fn.va)) return "ai";
+/** What the tree knows about each function's AI results. */
+export interface TreeMarks {
+    /** Has a decompile result. */
+    decompiled: Set<string>;
+    /** Has a bugs or behaviour result — the fuller analysis. */
+    analysed: Set<string>;
+    /** Has a stored result that records a failure, for any task. */
+    failed: Set<string>;
+}
+
+export const NO_MARKS: TreeMarks = {
+    decompiled: new Set(), analysed: new Set(), failed: new Set(),
+};
+
+/** Which mark a function gets.
+ *
+ *  Order is a precedence, not a sequence: partial success outranks failure, so a
+ *  function that lifted cleanly and then failed the bug pass stays yellow. It
+ *  has something to show; calling it a failure would hide that. */
+function stateOf(fn: FunctionSummary, marks: TreeMarks): AnalysisState {
+    if (marks.analysed.has(fn.va)) return "ai";
+    if (marks.decompiled.has(fn.va)) return "decompiled";
+    if (marks.failed.has(fn.va)) return "failed";
     // Never going to be sent to a model, so "waiting for AI" would be a lie.
     if (fn.is_thunk || fn.is_imported_stub || fn.is_library_code) return "limited";
     // Nothing to show for itself: no blocks recovered at all.
     if ((fn.block_count ?? 0) === 0) return "limited";
-    return "engine";
+    return "pending";
 }
 
 interface Props {
@@ -328,18 +369,16 @@ interface Props {
     strings: ExtractedString[];
     currentVa: string | null;
     filter: string;
-    /** Addresses that have a decompile result. Drives the green marks. */
-    analysed?: Set<string>;
+    /** What the AI layer has produced so far. Drives the coloured marks. */
+    marks?: TreeMarks;
     onOpenFunction: (va: string) => void;
     /** Imports, strings and sections do not navigate to an address — they ask
      *  "who uses this". The shell opens a window for the answer. */
     onOpenXref?: (subject: XrefSubject) => void;
 }
 
-const NO_ANALYSIS: Set<string> = new Set();
-
 export default function SymbolTree({
-    functions, image, strings, currentVa, filter, analysed = NO_ANALYSIS,
+    functions, image, strings, currentVa, filter, marks = NO_MARKS,
     onOpenFunction, onOpenXref,
 }: Props) {
     const [open, setOpen] = useState<Set<string>>(
@@ -436,7 +475,7 @@ export default function SymbolTree({
                         {/* Only on functions: an import or a string has nothing
                             to be analysed. */}
                         {node.kind === "function" && node.fn && (() => {
-                            const mark = STATE_MARK[stateOf(node.fn, analysed)];
+                            const mark = STATE_MARK[stateOf(node.fn, marks)];
                             return (
                                 <span className={`tmark ${mark.cls}`} title={mark.title}>
                                     {mark.glyph}

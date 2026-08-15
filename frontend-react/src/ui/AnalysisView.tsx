@@ -11,7 +11,7 @@
  * Hiding without relocating is how panes become unreachable.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getAiFindings, getFunction, type AiFinding } from "../api/client";
+import { getAiCoverage, getAiFindings, getFunction, type AiFinding } from "../api/client";
 import type {
     ExtractedString, Finding, FindingsDocument, FunctionDetail, FunctionSummary,
     ImageInfo,
@@ -24,7 +24,7 @@ import Decompiler from "./Decompiler";
 import FindingsBox from "./FindingsBox";
 import FloatingWindow from "./FloatingWindow";
 import MetricsBar from "./MetricsBar";
-import SymbolTree from "./SymbolTree";
+import SymbolTree, { NO_MARKS, type TreeMarks } from "./SymbolTree";
 import XrefWindow, { xrefTitle, type XrefSubject } from "./XrefWindow";
 import {
     Disassembly, ImportsPane, SectionsPane, StringsPane, XrefsPane,
@@ -81,6 +81,8 @@ export default function AnalysisView({
     const [showLibraryStrings, setShowLibraryStrings] = useState(false);
     const [aiFindings, setAiFindings] = useState<AiFinding[]>([]);
     const [n8nConfigured, setN8nConfigured] = useState<boolean | null>(null);
+    /** What the AI layer has produced, for the tree's marks. */
+    const [marks, setMarks] = useState<TreeMarks>(NO_MARKS);
     // The call summary card: what a call does, answered where it is asked.
     const [callAnchor, setCallAnchor] = useState<CallAnchor | null>(null);
     // "What exactly are we sending the model?" — a window, like the graph, so it
@@ -145,8 +147,25 @@ export default function AnalysisView({
                 setN8nConfigured(document.n8n_configured);
             })
             .catch(() => { /* engine findings still render */ });
+        /* The same marks the AI Analysis tab shows. Two trees over one binary
+         * disagreeing about what has been analysed is worse than neither having
+         * marks at all — and this is the tab where Lift with AI is clicked. */
+        void getAiCoverage()
+            .then((coverage) => {
+                if (cancelled) return;
+                setMarks({
+                    decompiled: new Set(coverage.decompile),
+                    analysed: new Set([...coverage.bugs, ...coverage.behaviour]),
+                    failed: new Set([
+                        ...coverage.failed.decompile,
+                        ...coverage.failed.bugs,
+                        ...coverage.failed.behaviour,
+                    ]),
+                });
+            })
+            .catch(() => { /* marks degrade to "nothing run yet" */ });
         return () => { cancelled = true; };
-    }, [findings]);
+    }, [findings, detail?.va]);
 
     useEffect(() => {
         if (!detail && functions.length > 0) void openFunction(functions[0].va);
@@ -221,6 +240,7 @@ export default function AnalysisView({
             strings={strings}
             currentVa={detail?.va ?? null}
             filter={filter}
+            marks={marks}
             onOpenFunction={(va) => void openFunction(va)}
             onOpenXref={setOpenXref}
         />

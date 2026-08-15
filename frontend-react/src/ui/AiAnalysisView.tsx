@@ -18,7 +18,7 @@
  * tree and findings box stay on the left because they are how you read the result
  * — a finished run is only useful if you can click straight into what it found.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
     getAiCoverage, getAiFindings, getBehaviourProfile,
     type AiFinding, type BehaviourProfile,
@@ -33,7 +33,7 @@ import { Panel } from "./Chrome";
 import AutomatedRun from "./AutomatedRun";
 import FindingsBox from "./FindingsBox";
 import FloatingWindow from "./FloatingWindow";
-import SymbolTree from "./SymbolTree";
+import SymbolTree, { NO_MARKS, type TreeMarks } from "./SymbolTree";
 
 interface Props {
     detail: FunctionDetail | null;
@@ -65,9 +65,14 @@ export default function AiAnalysisView({
     const [profile, setProfile] = useState<BehaviourProfile | null>(null);
     /** Bumped by the run each time a stage completes, to refetch results. */
     const [nonce, setNonce] = useState(0);
-    /** Addresses with a decompile result, for the tree's green marks. */
-    const [analysed, setAnalysed] = useState<Set<string>>(new Set());
+    /** What the AI layer has produced, for the tree's marks. */
+    const [marks, setMarks] = useState<TreeMarks>(NO_MARKS);
+    /* How many functions the bug pass has actually been over. An empty findings
+     * list means two different things — nobody asked, or the model looked and
+     * had nothing to say — and only this number tells them apart. */
+    const [bugsRun, setBugsRun] = useState(0);
     const [choiceOpen, setChoiceOpen] = useState(false);
+    const [inputOpen, setInputOpen] = useState(false);
 
     const reload = useCallback(async () => {
         /* Which functions have been through the model. Read from the stored
@@ -75,8 +80,20 @@ export default function AiAnalysisView({
          * weeks ago still counts as analysed. */
         try {
             const coverage = await getAiCoverage();
-            setAnalysed(new Set(coverage.decompile ?? []));
-        } catch { /* the marks degrade to "engine only", which is not a lie */ }
+            setMarks({
+                decompiled: new Set(coverage.decompile),
+                /* Green is the fuller pass. A function the model only lifted has
+                 * not been reasoned about yet, and saying otherwise is how the
+                 * tree ends up claiming more coverage than the run achieved. */
+                analysed: new Set([...coverage.bugs, ...coverage.behaviour]),
+                failed: new Set([
+                    ...coverage.failed.decompile,
+                    ...coverage.failed.bugs,
+                    ...coverage.failed.behaviour,
+                ]),
+            });
+            setBugsRun(coverage.bugs.length);
+        } catch { /* the marks degrade to "nothing run yet", which is not a lie */ }
         try {
             const document = await getAiFindings();
             if (document) {
@@ -90,6 +107,14 @@ export default function AiAnalysisView({
     }, []);
 
     useEffect(() => { void reload(); }, [reload, nonce, findings]);
+
+    /* "Already has some result" — what the hand-picked run means by skipping a
+     * function. Coarser than the tree's marks on purpose: a lift alone is still
+     * a request you have paid for and may not want to repeat. */
+    const anyResult = useMemo(
+        () => new Set([...marks.decompiled, ...marks.analysed]),
+        [marks],
+    );
 
     /* Stable identity matters here. AutomatedRun's polling effect lists this in
      * its dependencies, so an inline arrow — a new function on every render —
@@ -113,15 +138,17 @@ export default function AiAnalysisView({
                         strings={strings}
                         currentVa={detail?.va ?? null}
                         filter={treeFilter}
-                        analysed={analysed}
+                        marks={marks}
                         onOpenFunction={onSelectFunction}
                     />
                     {/* Colour alone would fail a colour-blind reader and every
                         printed copy of the report, so the legend spells it out. */}
                     <div className="tree-legend">
-                        <span><span className="tmark mk-ai">●</span> AI</span>
-                        <span><span className="tmark mk-engine">●</span> engine only</span>
-                        <span><span className="tmark mk-limited">●</span> limited</span>
+                        <span><span className="tmark mk-ai">●</span> analysed</span>
+                        <span><span className="tmark mk-decompiled">●</span> lifted</span>
+                        <span><span className="tmark mk-pending">●</span> not run</span>
+                        <span><span className="tmark mk-failed">✕</span> failed</span>
+                        <span><span className="tmark mk-limited">●</span> excluded</span>
                     </div>
                 </Panel>
                 <input
@@ -172,7 +199,11 @@ export default function AiAnalysisView({
                     overwritten; a model explains a rating here, it never sets one.
                 </p>
 
-                <AutomatedRun onMessage={onRunProgress} onChooseRun={() => setChoiceOpen(true)} />
+                <AutomatedRun
+                    onMessage={onRunProgress}
+                    onChooseRun={() => setChoiceOpen(true)}
+                    onShowInput={() => setInputOpen(true)}
+                />
 
                 {choiceOpen && (
                     <FloatingWindow
@@ -184,7 +215,7 @@ export default function AiAnalysisView({
                         <ChoiceRun
                             functions={functions}
                             findings={findings}
-                            analysed={analysed}
+                            analysed={anyResult}
                             onClose={() => { setChoiceOpen(false); setNonce((n) => n + 1); }}
                             onMessage={onMessage}
                         />
@@ -193,23 +224,35 @@ export default function AiAnalysisView({
 
                 {/* The run above sends one of these per function per stage. Being
                     able to open one is the difference between "the AI analysed
-                    it" and being able to say what the AI was actually given. */}
-                <h2 style={{ marginTop: 14 }}>What gets sent to the model</h2>
-                {!detail && (
-                    <div className="empty">
-                        Pick a function in the tree to see the context that would be
-                        sent for it.
-                    </div>
-                )}
-                {detail && (
-                    <>
-                        <p className="dim">
-                            Every function in the run is sent a bundle like this, once
-                            per stage. Showing <b>{detail.name}</b> — select another in
-                            the tree to compare.
-                        </p>
-                        <AiInputView va={detail.va} name={detail.name} />
-                    </>
+                    it" and being able to say what the AI was actually given.
+                    A window rather than a section: it is consulted, not read
+                    through, and it was pushing the results down the page. */}
+                {inputOpen && (
+                    <FloatingWindow
+                        title="What gets sent to the model"
+                        hint={detail
+                            ? `the exact bundle for ${detail.name}`
+                            : "pick a function in the tree"}
+                        onClose={() => setInputOpen(false)}
+                        initial={{ x: 140, y: 90, width: 860, height: 600 }}
+                    >
+                        {detail ? (
+                            <>
+                                <p className="dim" style={{ margin: "0 0 6px 0" }}>
+                                    Every function in the run is sent a bundle like
+                                    this, once per stage. Showing <b>{detail.name}</b>{" "}
+                                    — the window stays open, so select another in the
+                                    tree to compare.
+                                </p>
+                                <AiInputView va={detail.va} name={detail.name} />
+                            </>
+                        ) : (
+                            <div className="empty">
+                                Pick a function in the tree to see the context that
+                                would be sent for it.
+                            </div>
+                        )}
+                    </FloatingWindow>
                 )}
 
                 {/* --- What the run actually found -----------------------------
@@ -227,11 +270,26 @@ export default function AiAnalysisView({
                     )}
                 </h2>
 
+                {/* "The model found nothing" and "the model was never asked" are
+                    the same empty list, and telling them apart is the difference
+                    between a clean result and a broken pipeline. Most functions
+                    come back with no issues; without this line that reads as a
+                    failure every time. */}
                 {aiFindings.length === 0 && (
-                    <div className="empty">
-                        Nothing reported yet. Run the automated analysis, or use
-                        <b> Find bugs</b> on a single function.
-                    </div>
+                    bugsRun > 0 ? (
+                        <div className="empty">
+                            The bug pass has been over <b>{bugsRun}</b>{" "}
+                            {bugsRun === 1 ? "function" : "functions"} and reported no
+                            defects in {bugsRun === 1 ? "it" : "them"}. That is a
+                            result, not a failure — the marks in the tree show which
+                            functions were covered.
+                        </div>
+                    ) : (
+                        <div className="empty">
+                            Nothing reported yet. Run the automated analysis, or use
+                            <b> Find bugs</b> on a single function.
+                        </div>
+                    )
                 )}
 
                 {aiFindings.map((finding, index) => (

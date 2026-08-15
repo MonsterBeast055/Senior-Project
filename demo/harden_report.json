@@ -1,0 +1,69 @@
+﻿{
+  "schema_version": "1.0",
+  "ok": true,
+  "input": "C:\\Users\\rozan\\Desktop\\Senior-Project\\demo\\demo_target.exe",
+  "output": "C:\\Users\\rozan\\Desktop\\Senior-Project\\demo\\demo_target_hardened.exe",
+  "applied": [
+      "DEP (NX_COMPAT): stack and heap marked non-executable",
+      "ASLR (DYNAMIC_BASE): image may load at a randomised base"
+    ],
+  "refused": [
+      "High-entropy ASLR (HIGH_ENTROPY_VA): already enabled",
+      "W^X: section(s) '.data' are writable AND executable, which is how injected data becomes running code. Not changed automatically: removing a permission the image genuinely uses - a packer, or self-modifying code - would break it. Re-run with the option enabled once you have established it does neither.",
+      "Control Flow Guard (GUARD_CF): cannot be added, it needs the guard tables the compiler emits. Rebuild with /guard:cf.",
+      "NO_SEH: reported only. Setting it asserts the image installs no structured exception handler, and asserting that wrongly disables exception handling the program depends on. Establishing it needs the load configuration directory, which this pass does not read.",
+      "Stack cookies (/GS): not representable in the PE header. They are compiler-emitted code, so their absence cannot be seen here and their presence cannot be added. Rebuild with /GS.",
+      "CET shadow stack: not visible from the optional header. The flag lives in an extended-characteristics debug directory entry, which this pass does not parse. Rebuild with /CETCOMPAT to enable it."
+    ],
+  "before": {
+    "parsed": true,
+    "format": "PE32+",
+    "dll_characteristics": "0x8020",
+    "aslr": false,
+    "high_entropy_va": true,
+    "dep": false,
+    "cfg": false,
+    "has_relocations": true,
+    "relocations_stripped": false,
+    "signed_image": false,
+    "checksum_valid": false,
+    "has_write_execute": true,
+    "sections": [
+      {"name": ".text", "read": true, "write": false, "execute": true, "code": true, "write_execute": false},
+      {"name": ".bss", "read": true, "write": true, "execute": false, "code": false, "write_execute": false},
+      {"name": ".rdata", "read": true, "write": false, "execute": false, "code": false, "write_execute": false},
+      {"name": ".data", "read": true, "write": true, "execute": true, "code": false, "write_execute": true},
+      {"name": ".pdata", "read": true, "write": false, "execute": false, "code": false, "write_execute": false},
+      {"name": ".idata", "read": true, "write": false, "execute": false, "code": false, "write_execute": false},
+      {"name": ".00cfg", "read": true, "write": false, "execute": false, "code": false, "write_execute": false},
+      {"name": ".reloc", "read": true, "write": false, "execute": false, "code": false, "write_execute": false}
+    ],
+    "fully_hardened": false
+  },
+  "after": {
+    "parsed": true,
+    "format": "PE32+",
+    "dll_characteristics": "0x8160",
+    "aslr": true,
+    "high_entropy_va": true,
+    "dep": true,
+    "cfg": false,
+    "has_relocations": true,
+    "relocations_stripped": false,
+    "signed_image": false,
+    "checksum_valid": true,
+    "has_write_execute": true,
+    "sections": [
+      {"name": ".text", "read": true, "write": false, "execute": true, "code": true, "write_execute": false},
+      {"name": ".bss", "read": true, "write": true, "execute": false, "code": false, "write_execute": false},
+      {"name": ".rdata", "read": true, "write": false, "execute": false, "code": false, "write_execute": false},
+      {"name": ".data", "read": true, "write": true, "execute": true, "code": false, "write_execute": true},
+      {"name": ".pdata", "read": true, "write": false, "execute": false, "code": false, "write_execute": false},
+      {"name": ".idata", "read": true, "write": false, "execute": false, "code": false, "write_execute": false},
+      {"name": ".00cfg", "read": true, "write": false, "execute": false, "code": false, "write_execute": false},
+      {"name": ".reloc", "read": true, "write": false, "execute": false, "code": false, "write_execute": false}
+    ],
+    "fully_hardened": true
+  },
+  "note": "Mitigations change how the loader treats this image. They do not repair the defects the analysis found - see the findings for those."
+}

@@ -1312,9 +1312,69 @@ body.dragging-window, body.dragging-window * {
     line-height: 1;
     cursor: help;
 }
-.tmark.mk-ai      { color: #178040; }   /* AI has decompiled it */
-.tmark.mk-engine  { color: #C08A1E; }   /* engine only */
-.tmark.mk-limited { color: #A32D2D; }   /* engine result incomplete, or excluded */
+/* Progress through the AI passes. The two reds share a hue because they mean
+   the same thing to a reader — no usable result — and are told apart by their
+   glyph (● not asked, ✕ asked and failed), which survives greyscale printing. */
+.tmark.mk-ai         { color: #178040; }   /* bug or behaviour result exists */
+.tmark.mk-decompiled { color: #C08A1E; }   /* lifted to C, nothing further */
+.tmark.mk-failed     { color: #A32D2D; font-weight: bold; }  /* tried, unusable */
+.tmark.mk-pending    { color: #A32D2D; }   /* never sent to the model */
+.tmark.mk-limited    { color: #8A8A8A; }   /* deliberately never sent */
+
+/* Summary tab: process tracking, one row per function per run. */
+.summarypage {
+    padding: 10px 12px;
+    overflow: auto;
+    height: 100%;
+}
+
+/* Stage strip: which pass is working right now. */
+.stagestrip {
+    display: flex;
+    gap: 14px;
+    flex-wrap: wrap;
+    padding: 5px 7px;
+    margin: 6px 0;
+    border: 1px solid #808080;
+    background: #F1F1F1;
+}
+
+.stagestrip .stage { color: #404040; }
+.stagestrip .stage.running { color: #000000; }
+
+table.runlog td.cell {
+    text-align: center;
+    font-weight: bold;
+    width: 96px;
+}
+
+/* Expander for the behaviour narrative. A button, not a link: it toggles
+   something on this page rather than going anywhere. */
+.linkish {
+    border: 1px solid #808080;
+    background: #ECE9D8;
+    font: inherit;
+    line-height: 1;
+    width: 14px;
+    padding: 0;
+    margin-right: 4px;
+    cursor: pointer;
+}
+.linkish:hover { background: #F5F3E6; }
+/* Keeps the names aligned when a row has nothing to expand. */
+.notoggle { display: inline-block; width: 14px; margin-right: 4px; }
+
+table.runlog tr.narrative td {
+    background: #FBFBF4;
+    border-top: none;
+    padding: 4px 8px 7px 26px;
+    white-space: normal;
+}
+
+.cell-ok   { color: #178040; }
+.cell-bad  { color: #A32D2D; }
+.cell-wait { color: #C08A1E; }
+.cell-none { color: #A0A0A0; font-weight: normal; }
 
 /* Hand-picked run: functions on the left, findings on the right. */
 .choicegrid {
@@ -1338,6 +1398,13 @@ body.dragging-window, body.dragging-window * {
     white-space: nowrap;
 }
 .choicerow:hover { background: #E8F0FE; }
+
+/* Ticked by a finding rather than by the reader, and not theirs to untick. The
+   tint says "this is included and settled" without a second control that only
+   refuses to work. */
+.choicerow.locked { background: #FFF8E4; cursor: default; }
+.choicerow.locked:hover { background: #FFF3D4; }
+.choicerow.locked .tlabel { font-weight: bold; }
 .choicerow .tlabel { overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 860px) {
     .choicegrid { flex-direction: column; }

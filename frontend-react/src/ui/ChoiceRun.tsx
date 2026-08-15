@@ -13,7 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-    previewSelection, startAiBatch, type AiTask, type SelectionPreview,
+    newBatchId, previewSelection, startAiBatch, type AiTask, type SelectionPreview,
 } from "../api/client";
 import type { Finding, FindingsDocument, FunctionSummary } from "../api/types";
 
@@ -45,16 +45,52 @@ export default function ChoiceRun({
 
     const findingKey = (f: Finding) => `${f.function}|${f.api}`;
 
+    /* Functions the selected findings drag in.
+     *
+     * The same rule the backend applies in `selectionForFindings`: the finding's
+     * own function, plus every step of its call path. Duplicated here rather
+     * than asked for, because the preview returns one flat list and cannot say
+     * which entries came from a finding - and being unable to say that is
+     * exactly what made this selection opaque. If the backend rule changes,
+     * this has to change with it.
+     *
+     * They are ticked and locked. Unticking one would be a request the run
+     * cannot honour: the path is what makes the finding reachable, and dropping
+     * a hop analyses the sink without the code that reaches it. */
+    const viaFindings = useMemo(() => {
+        const out = new Set<string>();
+        for (const f of findings?.findings ?? []) {
+            if (!pickedFindings.has(findingKey(f))) continue;
+            out.add(f.function);
+            for (const step of f.call_path) out.add(step.va);
+        }
+        return out;
+    }, [findings, pickedFindings]);
+
     const visible = useMemo(() => {
         const needle = filter.trim().toLowerCase();
-        return functions
-            .filter((f) => !f.is_thunk && !f.is_imported_stub && !f.is_library_code)
+        const candidates = functions
+            .filter((f) => !f.is_thunk && !f.is_imported_stub && !f.is_library_code);
+
+        /* Locked functions are pinned to the top and exempt from both the filter
+         * and the cap. The point of showing them is to answer "what is actually
+         * going to run", and an answer that a search box can hide is not one.
+         * They are drawn from the unfiltered list because a call path can pass
+         * through a thunk or a library function. */
+        const locked = functions
+            .filter((f) => viaFindings.has(f.va))
+            .sort((a, b) => (b.information_score ?? 0) - (a.information_score ?? 0));
+
+        const rest = candidates
+            .filter((f) => !viaFindings.has(f.va))
             .filter((f) => !needle
                 || f.name.toLowerCase().includes(needle)
                 || f.va.includes(needle))
             .sort((a, b) => (b.information_score ?? 0) - (a.information_score ?? 0))
             .slice(0, 400);
-    }, [functions, filter]);
+
+        return [...locked, ...rest];
+    }, [functions, filter, viaFindings]);
 
     /* Previewed on the server, because only it can walk the call graph — and
      * because the number has to be right rather than approximately right. */
@@ -96,15 +132,45 @@ export default function ChoiceRun({
 
     const requests = finalSelection.length * tasks.size;
 
+    /* Why the run cannot start, in words, or null when it can.
+     *
+     * This used to be a bare `return` at the top of run(). Pressing the button
+     * did nothing, said nothing, and left no error - and the commonest way to
+     * reach it is the least obvious: `skipAnalysed` defaults on, so picking two
+     * functions that already have results filters both out and the selection is
+     * empty. Silence made that look like the feature was broken on small
+     * selections rather than like a setting doing its job. */
+    const blocked = useMemo(() => {
+        if (tasks.size === 0) return "Pick at least one stage to run.";
+        if (preview === null) return "Pick at least one function.";
+        const selected = preview.selected.length;
+        if (selected === 0) return "Nothing was selected.";
+        if (finalSelection.length === 0) {
+            return `All ${selected} selected function${selected === 1 ? "" : "s"} `
+                + `already ${selected === 1 ? "has a result" : "have results"}. `
+                + `Untick "skip functions that already have results" to run `
+                + `${selected === 1 ? "it" : "them"} again.`;
+        }
+        return null;
+    }, [tasks, preview, finalSelection]);
+
     async function run() {
-        if (finalSelection.length === 0 || tasks.size === 0) return;
+        if (blocked) {
+            setError(blocked);
+            return;
+        }
         setBusy(true);
         setError(null);
         try {
+            /* One id for the whole action. Picking six functions and asking for
+             * lift-then-bugs is one thing the person did, and the Summary tab
+             * should show it as one row group rather than two runs that happen
+             * to share a timestamp. */
+            const batch = newBatchId();
             // Stage order still matters: bug hunting reads what lifting produced.
             for (const stage of STAGES) {
                 if (!tasks.has(stage.task)) continue;
-                await startAiBatch(stage.task, { only: finalSelection });
+                await startAiBatch(stage.task, { only: finalSelection, batch });
             }
             onMessage(
                 `Started on ${finalSelection.length} function`
@@ -138,7 +204,12 @@ export default function ChoiceRun({
                             placeholder="filter by name or address"
                             onChange={(event) => setFilter(event.target.value)}
                         />
-                        <span className="dim">{picked.size} picked</span>
+                        <span className="dim">
+                            {picked.size} picked
+                            {viaFindings.size > 0 && (
+                                <>{" "}+ {viaFindings.size} on finding paths</>
+                            )}
+                        </span>
                         <span style={{ flex: 1 }} />
                         <button className="xp" onClick={() => setPicked(new Set())}>
                             Clear
@@ -148,16 +219,29 @@ export default function ChoiceRun({
                     <div className="choicelist">
                         {visible.map((f) => {
                             const done = analysed.has(f.va);
+                            const locked = viaFindings.has(f.va);
                             return (
-                                <label key={f.va} className="choicerow">
+                                <label
+                                    key={f.va}
+                                    className={`choicerow${locked ? " locked" : ""}`}
+                                >
                                     <input
                                         type="checkbox"
-                                        checked={picked.has(f.va)}
+                                        checked={picked.has(f.va) || locked}
+                                        disabled={locked}
                                         onChange={() => toggle(picked, f.va, setPicked)}
                                     />
                                     <span className="tlabel">{f.name}</span>
                                     <span className="dim mono">{f.va}</span>
                                     <span style={{ flex: 1 }} />
+                                    {locked && (
+                                        <span
+                                            className="badge warn"
+                                            title="On the call path of a selected finding. It goes with the finding, so it cannot be unticked here — deselect the finding instead."
+                                        >
+                                            on path
+                                        </span>
+                                    )}
                                     {/* Already analysed is shown, not hidden: you may
                                         deliberately want to redo one. */}
                                     {done && <span className="fbsrc engine">done</span>}
@@ -183,7 +267,9 @@ export default function ChoiceRun({
                     <p className="dim" style={{ margin: "2px 0 4px 0" }}>
                         Selecting a finding adds every function on its call path. The
                         path is already derived, so this is a lookup rather than a
-                        second analysis.
+                        second analysis. Those functions tick themselves on the left
+                        and stay ticked: the path is what makes the finding
+                        reachable, so it travels with it.
                     </p>
                     <div className="choicelist" style={{ maxHeight: 170 }}>
                         {(findings?.findings ?? []).map((f) => (
@@ -198,6 +284,31 @@ export default function ChoiceRun({
                                 <span className="tlabel">{f.kind}</span>
                                 <span className="dim mono">{f.function_name}</span>
                                 <span style={{ flex: 1 }} />
+                                {/* Two things worth knowing before spending a run
+                                    on a finding: whether a path from an input
+                                    source exists at all, and that the rating is
+                                    the engine's rather than a model's. */}
+                                {f.reachable_from_input ? (
+                                    <span
+                                        className="badge warn"
+                                        title="A call path exists from a function that reads untrusted input. Not a proof that attacker-controlled data reaches the argument."
+                                    >
+                                        reach
+                                    </span>
+                                ) : (
+                                    <span
+                                        className="dim"
+                                        title="No call path from a known input source was found. The operation is still risky; nothing was shown to reach it."
+                                    >
+                                        no reach
+                                    </span>
+                                )}
+                                <span
+                                    className="fbsrc engine"
+                                    title="Found by the static engine, and its severity is the engine's. A model never sets a rating."
+                                >
+                                    engine
+                                </span>
                                 <span className="dim">{f.call_path.length} hops</span>
                             </label>
                         ))}
@@ -244,6 +355,12 @@ export default function ChoiceRun({
             </div>
 
             {error && <div className="notice"><b>Failed.</b> {error}</div>}
+
+            {/* Said before the click, not after it. A disabled button with no
+                stated reason is the same silence one step earlier. */}
+            {!error && blocked && preview && (
+                <div className="notice"><b>Cannot run yet.</b> {blocked}</div>
+            )}
 
             {/* --- the confirmation ---------------------------------------- */}
             <div className="notice">
@@ -310,7 +427,8 @@ export default function ChoiceRun({
                 <button className="xp" onClick={onClose}>Cancel</button>
                 <button
                     className="xp"
-                    disabled={busy || finalSelection.length === 0 || tasks.size === 0}
+                    disabled={busy}
+                    title={blocked ?? undefined}
                     onClick={() => void run()}
                 >
                     {busy ? "Starting…" : `Run on ${finalSelection.length}`}

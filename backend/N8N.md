@@ -30,7 +30,7 @@ result cannot be filed against the wrong function or sent to the wrong machine.
 > Earlier drafts of this document showed `http://localhost:3000{{callback}}`,
 > because `callback` used to be a bare path. It is now absolute. If your workflow
 > still prefixes an origin, it will produce a URL like
-> `http://localhost:3000http://192.168.1.75:3000/api/...` and nothing will arrive.
+> `http://localhost:3000http://10.113.133.176:3000/api/...` and nothing will arrive.
 
 ## Shortcut — import the ready-made workflow
 
@@ -71,8 +71,8 @@ backend now warns at startup if it spots the mistake on its side.
 In `backend/.env`:
 
 ```
-N8N_WEBHOOK_URL=http://192.168.1.103:5678/webhook/analyze
-PUBLIC_BASE_URL=http://192.168.1.75:3000
+N8N_WEBHOOK_URL=http://10.113.133.70:5678/webhook/analyze
+PUBLIC_BASE_URL=http://10.113.133.176:3000
 ```
 
 The webhook path is whatever n8n generated on your Webhook node. `analyze` is
@@ -121,7 +121,7 @@ with the webhook pointed at a listener:
   "task": "decompile",
   "run_id": "20260808065600-af9a70d5",
   "va": "0x1400023a0",
-  "callback": "http://192.168.1.75:3000/api/runs/20260808065600-af9a70d5/ai/decompile/0x1400023a0/result",
+  "callback": "http://10.113.133.176:3000/api/runs/20260808065600-af9a70d5/ai/decompile/0x1400023a0/result",
 
   "context": null,               // what the human said about the binary, if anything
   "image": { "arch": "x86_64", "image_base": "0x140000000",
@@ -237,7 +237,7 @@ about the network path, which is the part most likely to be wrong.
 RUN=<run id from the Reports tab>
 curl -X POST -H 'Content-Type: application/json' \
   -d '{"model":"manual-test","code":"int f(){return 0;}","summary":"Test."}' \
-  http://192.168.1.75:3000/api/runs/$RUN/ai/decompile/0x1400023a0/result
+  http://10.113.133.176:3000/api/runs/$RUN/ai/decompile/0x1400023a0/result
 ```
 
 If n8n is in Docker, run it inside the container (`docker exec -it <name> sh`),

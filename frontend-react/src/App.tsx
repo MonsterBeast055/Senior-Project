@@ -29,19 +29,21 @@ import FindingWindow from "./ui/FindingWindow";
 import FloatingWindow from "./ui/FloatingWindow";
 import MenuBar, { type MenuDefinition } from "./ui/MenuBar";
 import ReportsView from "./ui/ReportsView";
+import SummaryView from "./ui/SummaryView";
 import UploadView from "./ui/UploadView";
 import "./styles/xp.css";
 
 /* Order here is the order of the tabs. AI Analysis sits between Analysis and
    Reports: you analyse a binary, then ask the model about it, then look back at
    what you have accumulated. */
-type View = "upload" | "analysis" | "ai" | "security" | "reports";
+type View = "upload" | "analysis" | "ai" | "security" | "summary" | "reports";
 
 const VIEW_LABEL: Record<View, string> = {
     upload: "Upload",
     analysis: "Analysis",
     ai: "AI Analysis",
     security: "Security",
+    summary: "Summary",
     reports: "Reports",
 };
 
@@ -205,6 +207,12 @@ export default function App() {
                     checked: view === "security",
                     enabled: loaded,
                     run: () => setView("security"),
+                },
+                {
+                    label: "Summary",
+                    checked: view === "summary",
+                    enabled: loaded,
+                    run: () => setView("summary"),
                 },
                 { label: "Reports", checked: view === "reports", run: () => setView("reports") },
             ],
@@ -397,11 +405,11 @@ export default function App() {
             />
 
             <div className="viewnav">
-                {(["upload", "analysis", "ai", "security", "reports"] as View[]).map((id) => {
-                    // Analysis, AI Analysis and Security all need a loaded run:
-                    // one has nothing to show, one nothing to ask about, and one
-                    // no binary to inspect.
-                    const enabled = !["analysis", "ai", "security"].includes(id) || loaded;
+                {(["upload", "analysis", "ai", "security", "summary", "reports"] as View[]).map((id) => {
+                    // Every view but Upload and Reports needs a loaded run: one
+                    // has nothing to show, one nothing to ask about, one no binary
+                    // to inspect, and one no runs to track.
+                    const enabled = !["analysis", "ai", "security", "summary"].includes(id) || loaded;
                     return (
                         <div
                             key={id}
@@ -476,6 +484,19 @@ export default function App() {
                 hardened build exists, so returning restores everything. */}
             {view === "security" && loaded && (
                 <SecurityView fileName={fileName} onMessage={setMessage} />
+            )}
+
+            {/* Conditional for the same reason as Security: it holds no timer
+                and no unsaved state. Everything it shows is read back from the
+                job files, so leaving and returning costs nothing. */}
+            {view === "summary" && loaded && (
+                <SummaryView
+                    onMessage={setMessage}
+                    onOpenFunction={(va) => {
+                        void selectFunction(va);
+                        setView("analysis");
+                    }}
+                />
             )}
 
             {view === "reports" && (

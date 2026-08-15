@@ -17,7 +17,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-    getAiJob, resetAi, startAiBatch, stopAiBatch, type AiJob, type AiTask,
+    getAiJob, newBatchId, resetAi, startAiBatch, stopAiBatch,
+    type AiJob, type AiTask,
 } from "../api/client";
 
 interface Stage {
@@ -54,11 +55,15 @@ interface Props {
     onMessage: (text: string) => void;
     /** Opens the hand-picked selection dialog. Owned by the view above. */
     onChooseRun?: () => void;
+    /** Opens the payload inspector — what the model is actually given. */
+    onShowInput?: () => void;
 }
 
 type RunState = "idle" | "running" | "done" | "blocked" | "stopped";
 
-export default function AutomatedRun({ onMessage, onChooseRun }: Props) {
+export default function AutomatedRun({
+    onMessage, onChooseRun, onShowInput,
+}: Props) {
     const [state, setState] = useState<RunState>("idle");
     const [stageIndex, setStageIndex] = useState(-1);
     const [jobs, setJobs] = useState<Record<string, AiJob | null>>({});
@@ -67,6 +72,12 @@ export default function AutomatedRun({ onMessage, onChooseRun }: Props) {
     // Guards against a second run being started by a double click, and against
     // the poll continuing after the component unmounts.
     const runningRef = useRef(false);
+
+    /* The three stages are one action to the person who pressed the button, so
+     * they share an id and the Summary tab shows them as one run. Stage two and
+     * three are started from the polling effect, which is why this is a ref: it
+     * has to outlive the render that began the run. */
+    const batchRef = useRef("");
 
     const refresh = useCallback(async () => {
         const next: Record<string, AiJob | null> = {};
@@ -110,7 +121,7 @@ export default function AutomatedRun({ onMessage, onChooseRun }: Props) {
                 const following = STAGES[stageIndex + 1];
                 setStageIndex(stageIndex + 1);
                 try {
-                    await startAiBatch(following.task, {});
+                    await startAiBatch(following.task, { batch: batchRef.current });
                     // The status bar is the only view of this from another tab,
                     // and the run now continues while you are on one.
                     onMessage(
@@ -139,7 +150,8 @@ export default function AutomatedRun({ onMessage, onChooseRun }: Props) {
         setStageIndex(0);
         setState("running");
         try {
-            const first = await startAiBatch(STAGES[0].task, {});
+            batchRef.current = newBatchId();
+            const first = await startAiBatch(STAGES[0].task, { batch: batchRef.current });
             setJobs((current) => ({ ...current, [STAGES[0].task]: first }));
 
             // Without n8n the batch still selects and queues, but nothing can be
@@ -243,6 +255,18 @@ export default function AutomatedRun({ onMessage, onChooseRun }: Props) {
                         title="Pick the functions yourself, with a depth for their callees"
                     >
                         By choice…
+                    </button>
+                )}
+
+                {/* Beside the run buttons because both answer questions about the
+                    run itself: what went in, and what came of it. */}
+                {onShowInput && (
+                    <button
+                        className="xp"
+                        onClick={onShowInput}
+                        title="The exact bundle sent to the model for a function"
+                    >
+                        What gets sent…
                     </button>
                 )}
 

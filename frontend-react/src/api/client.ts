@@ -502,7 +502,7 @@ export async function getAiJob(task: AiTask): Promise<AiJob> {
 /** Start a batch. `only` overrides selection entirely, for the one-function case. */
 export async function startAiBatch(
     task: AiTask,
-    options: { limit?: number; only?: string[] } = {},
+    options: { limit?: number; only?: string[]; batch?: string } = {},
 ): Promise<AiJob> {
     if (mode === "sample") return EMPTY_JOB(task);
     const response = await fetch(`${base}/runs/${runId}/ai/${task}`, {
@@ -565,12 +565,111 @@ export async function getAiPayload(task: AiTask, va: string): Promise<AiPayload>
 }
 
 /** Which functions already have AI results, per task. */
-export async function getAiCoverage(): Promise<Record<AiTask, string[]>> {
-    const empty = { decompile: [], bugs: [], behaviour: [] } as Record<AiTask, string[]>;
+export interface AiCoverage {
+    decompile: string[];
+    bugs: string[];
+    behaviour: string[];
+    /** Addresses whose stored result records a failure rather than an analysis.
+     *  Kept apart from the lists above so the tree can say "this was tried and
+     *  it went wrong" instead of showing it as untouched. */
+    failed: Record<AiTask, string[]>;
+}
+
+export async function getAiCoverage(): Promise<AiCoverage> {
+    const empty: AiCoverage = {
+        decompile: [], bugs: [], behaviour: [],
+        failed: { decompile: [], bugs: [], behaviour: [] },
+    };
     if (mode === "sample") return empty;
     const response = await fetch(`${base}/runs/${runId}/ai/coverage`);
     if (!response.ok) return empty;
-    return (await response.json()) as Record<AiTask, string[]>;
+    const body = (await response.json()) as Partial<AiCoverage>;
+    // A backend that predates `failed` answers without it. Missing is empty,
+    // not undefined, so no caller has to guard.
+    return { ...empty, ...body, failed: { ...empty.failed, ...(body.failed ?? {}) } };
+}
+
+/* What became of one function in one pass.
+ *
+ * `done` is a usable result for a task with nothing to count - a lift or a
+ * behaviour description. `clean` is bugs-only: the model looked for defects and
+ * reported none, which is an answer rather than a silence. `none` means the
+ * pass was never asked about this function at all.
+ *
+ * There was a second view over this - a per-task outcome window - reading the
+ * same backend call the Summary tab reads. Two renderings of one dataset is how
+ * they drift, so it was removed and the one thing it had that Summary lacked
+ * (the failure reason as readable text, not a tooltip) moved into Summary.
+ */
+export type AiOutcomeState =
+    | "done" | "issues" | "clean" | "failed" | "waiting" | "queued"
+    | "skipped" | "none";
+
+/** What one task did for one function. `none` means it was never asked. */
+export interface SummaryCell {
+    state: AiOutcomeState;
+    issues: number | null;
+    error: string | null;
+}
+
+/** One function's row in the process-tracking table. */
+export interface SummaryRow {
+    va: string;
+    name: string;
+    score: number;
+    /** The behaviour pass's description of this function, when it has run. */
+    narrative: string | null;
+    /** Thunk, imported stub or library code — never selected automatically. */
+    excluded: boolean;
+    /** How it was most recently run, or null if it never has been. */
+    kind: "automated" | "batch" | "single" | "unknown" | null;
+    at: string | null;
+    tasks: Record<AiTask, SummaryCell>;
+}
+
+/** Live state of one pass, for the stage strip. */
+export interface SummaryStage {
+    task: AiTask;
+    state: string;
+    total: number;
+    done: number;
+    failed: number;
+    /** Has work in flight right now. Drives the bold marker. */
+    active: boolean;
+}
+
+export interface RunSummary {
+    stages: SummaryStage[];
+    rows: SummaryRow[];
+}
+
+/** A shared id for one user action that spans several tasks, so the run log
+ *  groups them as the person experienced them rather than as three requests. */
+export function newBatchId(): string {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export async function getRunSummary(): Promise<RunSummary> {
+    const empty: RunSummary = { stages: [], rows: [] };
+    if (mode === "sample") return empty;
+    const response = await fetch(`${base}/runs/${runId}/ai/summary`);
+    if (!response.ok) {
+        /* The server's own words, not just the number.
+         *
+         * `HTTP 400` alone is unreadable here, because the one thing that
+         * returns 400 on this path is the wildcard route binding task="summary"
+         * - which only happens when the running server predates this route.
+         * That body says so in as many words; discarding it turned a one-line
+         * diagnosis into a guess. */
+        const body = await response.json().catch(() => ({} as { error?: string }));
+        const detail = body.error ? `: ${body.error}` : "";
+        const hint = response.status === 400 || response.status === 404
+            ? " — this route is new, so restart the backend if it is still running"
+            + " an older copy."
+            : "";
+        throw new Error(`summary → HTTP ${response.status}${detail}${hint}`);
+    }
+    return { ...empty, ...((await response.json()) as RunSummary) };
 }
 
 export interface SelectionPreview {

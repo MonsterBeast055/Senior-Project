@@ -1055,6 +1055,12 @@ app.get("/api/runs/:id/ai/coverage", wrap(async (request, response) => {
     response.json(await aijobs.analysedFunctions(request.params.id));
 }));
 
+/** Process tracking: every analysable function, what each task did for it, and
+ *  the live stage state. Drives the Summary tab. */
+app.get("/api/runs/:id/ai/summary", wrap(async (request, response) => {
+    response.json(await aijobs.summary(request.params.id));
+}));
+
 /**
  * What a hand-picked selection would come to, without starting it.
  *
@@ -1185,6 +1191,10 @@ app.post("/api/runs/:id/ai/:task", wrap(async (request, response) => {
             // default here would have made "automated" mean "40, silently".
             limit: Number(request.body?.limit) > 0 ? Number(request.body.limit) : null,
             only: Array.isArray(request.body?.only) ? request.body.only : null,
+            /* One user action can span several tasks. When the client says they
+             * belong together, they are recorded as one batch rather than three
+             * that happen to share a timestamp. */
+            batch: typeof request.body?.batch === "string" ? request.body.batch : null,
         },
         dispatchAi,
     );
